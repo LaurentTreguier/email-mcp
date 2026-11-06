@@ -178,7 +178,7 @@ func TestMCPSessionViaQueryParams(t *testing.T) {
 			}, nil
 		},
 	})
-	endpoint := fmt.Sprintf("%s/example.com?email=user@example.com&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
+	endpoint := fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
 	transport := &mcp.StreamableClientTransport{Endpoint: endpoint}
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
@@ -221,7 +221,7 @@ func TestMCPSessionViaHeaderCredentials(t *testing.T) {
 
 	ctx := context.Background()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil) // no elicitation handler
-	endpoint := fmt.Sprintf("%s/example.com?email=user@example.com&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
+	endpoint := fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
 	transport := &mcp.StreamableClientTransport{
 		Endpoint: endpoint,
 		HTTPClient: &http.Client{
@@ -268,7 +268,7 @@ func TestBearerTokenUsedAsCredential(t *testing.T) {
 
 	ctx := context.Background()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	endpoint := fmt.Sprintf("%s/example.com?email=user@example.com&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
+	endpoint := fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
 	transport := &mcp.StreamableClientTransport{
 		Endpoint: endpoint,
 		HTTPClient: &http.Client{
@@ -309,7 +309,7 @@ func TestWrongHeaderCredentialFails(t *testing.T) {
 	// No elicitation handler: with a wrong header password the login must
 	// fail and the error must come from IMAP, not elicitation.
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	endpoint := fmt.Sprintf("%s/example.com?email=user@example.com&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
+	endpoint := fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
 	transport := &mcp.StreamableClientTransport{
 		Endpoint: endpoint,
 		HTTPClient: &http.Client{

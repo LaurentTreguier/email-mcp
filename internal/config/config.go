@@ -211,19 +211,22 @@ func parse(data []byte) (*Accounts, error) {
 	return &accs, nil
 }
 
-// FromQuery builds an account from URL query parameters. Supported params:
+// FromQuery builds an account for the URL path domain from query parameters.
+// Supported params:
 //
-//	email              (required) user's mail address, e.g. user@gmail.com
+//	username           (required) login name: either the local part
+//	                   (e.g. "user" for /gmail.com → user@gmail.com) or a
+//	                   full address whose domain matches the path
 //	display_name       display name for the From header
-//	username           login username (default: email)
 //	imap_host, imap_port, imap_tls / imap_starttls / imap_insecure
 //	smtp_host, smtp_port, smtp_tls / smtp_starttls / smtp_insecure
 //	auth_mechanism     plain (default) | login | xoauth2
 //	sent_mailbox, drafts_mailbox
 //
-// The password is never taken from the query string; it is obtained from the
-// user via elicitation or from the account config/env.
-func FromQuery(q map[string][]string) (*Account, error) {
+// The mail address is derived as username@domain; there is no separate email
+// param. The password is never taken from the query string; it is obtained
+// from the user via elicitation or from the account config/env.
+func FromQuery(domain string, q map[string][]string) (*Account, error) {
 	get := func(key string) string {
 		if v := q[key]; len(v) > 0 {
 			return v[0]
@@ -250,18 +253,30 @@ func FromQuery(q map[string][]string) (*Account, error) {
 		return n, nil
 	}
 
-	email := get("email")
-	if email == "" {
-		return nil, fmt.Errorf("missing required query param 'email' (e.g. ?email=user@gmail.com)")
+	username := get("username")
+	if username == "" {
+		return nil, fmt.Errorf("missing required query param 'username' (local part or full address, e.g. /%s?username=user)", domain)
 	}
-	if _, dom, ok := strings.Cut(email, "@"); !ok || dom == "" {
-		return nil, fmt.Errorf("invalid email %q", email)
+	email := username
+	login := username
+	if local, dom, ok := strings.Cut(username, "@"); ok {
+		if local == "" || dom == "" {
+			return nil, fmt.Errorf("invalid username %q", username)
+		}
+		if !strings.EqualFold(dom, domain) {
+			return nil, fmt.Errorf("username %q domain does not match path domain %q", username, domain)
+		}
+	} else {
+		// Bare local part: the full address (and, by default, the login
+		// name, as most providers require it) is local@domain.
+		email = username + "@" + domain
+		login = email
 	}
 
 	acc := &Account{
 		Email:         email,
 		DisplayName:   get("display_name"),
-		Username:      get("username"),
+		Username:      login,
 		AuthMechanism: get("auth_mechanism"),
 		SentMailbox:   get("sent_mailbox"),
 		DraftsMailbox: get("drafts_mailbox"),

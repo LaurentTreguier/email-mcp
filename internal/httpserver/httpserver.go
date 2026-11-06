@@ -4,7 +4,9 @@
 //   - static config (env EMAIL_MCP_ACCOUNTS or accounts.json), served at
 //     /{domain}
 //   - per-request query params, e.g.
-//     /gmail.com?email=user@gmail.com&imap_host=imap.gmail.com&imap_port=993&imap_tls=1
+//     /gmail.com?username=user&imap_host=imap.gmail.com&imap_port=993&imap_tls=1
+//     (the mail address is username@domain: /gmail.com?username=user is
+//     user@gmail.com)
 //     Server settings not given in the query are discovered automatically via
 //     DNS SRV/MX records.
 //   - per-request credentials via headers:
@@ -187,7 +189,7 @@ func hashCredential(s string) string {
 
 // cacheKey builds a stable cache key from the server-related query params.
 func cacheKey(q map[string][]string) string {
-	keys := []string{"email", "username", "imap_host", "imap_port", "imap_tls", "imap_starttls", "smtp_host", "smtp_port", "smtp_tls", "smtp_starttls", "auth_mechanism"}
+	keys := []string{"username", "imap_host", "imap_port", "imap_tls", "imap_starttls", "smtp_host", "smtp_port", "smtp_tls", "smtp_starttls", "auth_mechanism"}
 	var parts []string
 	for _, k := range keys {
 		if v := q[k]; len(v) > 0 {
@@ -200,9 +202,9 @@ func cacheKey(q map[string][]string) string {
 // buildAccount merges: static config account for the domain (if any) as the
 // base, query params on top, and DNS auto-discovery for anything still unset.
 func buildAccount(domain string, q map[string][]string, base *config.Account) (*config.Account, error) {
-	acc, err := config.FromQuery(q)
+	acc, err := config.FromQuery(domain, q)
 	if err != nil {
-		// No email param: maybe a static account exists for this domain.
+		// No username param: maybe a static account exists for this domain.
 		if base != nil {
 			cpy := *base
 			return &cpy, nil

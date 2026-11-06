@@ -59,12 +59,17 @@ func TestRootResultPageWithQuery(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("status = %d", code)
 	}
-	// The endpoint URL is derived from the email domain (lowercased), empty
-	// and unknown params are stripped, and params are sorted.
-	want := `value="http://` + `` // host is dynamic; checked by prefix below
-	_ = want
+	// The email field is split: domain becomes the path (lowercased),
+	// local part becomes the username param; empty/unknown params and the
+	// email param itself are stripped; params are sorted.
 	if !strings.Contains(body, "/gmail.com?") {
 		t.Errorf("result page missing cleaned /gmail.com path:\n%s", body)
+	}
+	if !strings.Contains(body, "username=user") {
+		t.Errorf("result page missing username=user from split email:\n%s", body)
+	}
+	if strings.Contains(body, "email=user") {
+		t.Errorf("result page must not contain an email= param:\n%s", body)
 	}
 	if !strings.Contains(body, "imap_host=mail.example.org") {
 		t.Errorf("result page missing imap_host param:\n%s", body)
@@ -110,7 +115,19 @@ func TestEndpointURL(t *testing.T) {
 		"evil":         {"<script>"},
 	}
 	u := endpointURL("https://mcp.example.org", q)
-	want := "https://mcp.example.org/example.org?email=User%40Example.ORG&imap_host=mail.example.org&smtp_tls=1"
+	want := "https://mcp.example.org/example.org?imap_host=mail.example.org&smtp_tls=1&username=User"
+	if u != want {
+		t.Errorf("endpointURL = %q, want %q", u, want)
+	}
+}
+
+func TestEndpointURLUsernameOverride(t *testing.T) {
+	q := map[string][]string{
+		"email":    {"user@example.org"},
+		"username": {"login-name"},
+	}
+	u := endpointURL("https://mcp.example.org", q)
+	want := "https://mcp.example.org/example.org?username=login-name"
 	if u != want {
 		t.Errorf("endpointURL = %q, want %q", u, want)
 	}

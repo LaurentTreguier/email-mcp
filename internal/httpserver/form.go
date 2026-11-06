@@ -13,10 +13,12 @@ import (
 
 // formParams lists the URL query options the setup form exposes, in display
 // order. It mirrors the keys accepted by config.FromQuery and the cache key.
+// The form's single "email" input is split into the path domain and the
+// "username" param when the endpoint URL is built (see endpointURL).
 var formParams = []string{
 	"email",
-	"display_name",
 	"username",
+	"display_name",
 	"auth_mechanism",
 	"imap_host",
 	"imap_port",
@@ -55,9 +57,11 @@ you will pass it via a header when connecting.</p>
 <form method="get" action="/">
 <fieldset>
 <legend>Account</legend>
-<p><label>email (required): <input type="text" name="email" placeholder="user@gmail.com" required></label></p>
+<p><label>email (required): <input type="text" name="email" placeholder="user@gmail.com" required></label>
+— split into the URL path (<code>/gmail.com</code>) and the
+<code>username</code> param (<code>?username=user</code>)</p>
 <p><label>display_name: <input type="text" name="display_name"></label></p>
-<p><label>username (default: email): <input type="text" name="username"></label></p>
+<p><label>username override (default: the email): <input type="text" name="username"></label></p>
 <p><label>auth_mechanism:
 <select name="auth_mechanism">
 <option value="">plain (default)</option>
@@ -121,7 +125,7 @@ func serveRoot(w http.ResponseWriter, r *http.Request, byDomain map[string]*conf
 		}
 		fmt.Fprintf(w, `"/%s"`, d)
 	}
-	fmt.Fprint(w, `],"zero_config":"/{domain}?email=user@domain — IMAP/SMTP settings are auto-discovered via DNS SRV/MX. Credentials: X-Email-Password header or Authorization: Bearer, else elicitation. Optional overrides: imap_host, imap_port, imap_tls, imap_starttls, smtp_host, smtp_port, smtp_tls, smtp_starttls, username, display_name, auth_mechanism, sent_mailbox, drafts_mailbox. Browsers: open / with an Accept: text/html header for a setup form"}`)
+	fmt.Fprint(w, `],"zero_config":"/{domain}?username=user — the mail address is username@domain. IMAP/SMTP settings are auto-discovered via DNS SRV/MX. Credentials: X-Email-Password header or Authorization: Bearer, else elicitation. Optional overrides: imap_host, imap_port, imap_tls, imap_starttls, smtp_host, smtp_port, smtp_tls, smtp_starttls, display_name, auth_mechanism, sent_mailbox, drafts_mailbox. Browsers: open / with an Accept: text/html header for a setup form"}`)
 }
 
 // serveForm renders the setup form (no query) or the result page (query
@@ -157,16 +161,27 @@ func hasAnyParam(q url.Values) bool {
 }
 
 // endpointURL builds the cleaned MCP endpoint URL from the form query params:
-// scheme://host/{domain}?{non-empty known params, sorted}. The domain comes
-// from the email address; unknown params are dropped.
+// scheme://host/{domain}?{non-empty known params, sorted}. The form's email
+// field is split into the path domain and the username param (an explicit
+// username field wins); the email param itself is never emitted. Unknown
+// params are dropped.
 func endpointURL(base string, q url.Values) string {
 	email := q.Get("email")
 	domain := ""
-	if _, dom, ok := strings.Cut(email, "@"); ok {
-		domain = strings.ToLower(dom)
+	local := ""
+	if l, dom, ok := strings.Cut(email, "@"); ok {
+		local, domain = l, strings.ToLower(dom)
 	}
 	vals := url.Values{}
+	if q.Get("username") != "" {
+		vals.Set("username", q.Get("username"))
+	} else if local != "" {
+		vals.Set("username", local)
+	}
 	for _, k := range formParams {
+		if k == "email" {
+			continue // consumed above: becomes path + username
+		}
 		if v := q.Get(k); v != "" {
 			vals.Set(k, v)
 		}

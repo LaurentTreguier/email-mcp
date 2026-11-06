@@ -4,10 +4,11 @@ A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP 
 
 ## Zero-config usage (default)
 
-No config file needed. Point the client at the domain of the mail account and pass the email address as a query param:
+No config file needed. Point the client at the domain of the mail account (the URL path) and pass the user as a query param — the mail address is `username@domain`:
 
 ```
-https://mcp.example.org/gmail.com?email=user@gmail.com
+https://mcp.example.org/gmail.com?username=user        # user@gmail.com
+https://mcp.example.org/gmail.com?username=user@gmail.com   # full address also works
 ```
 
 - **Server settings are auto-discovered** from DNS: `_imaps._tcp` / `_imap._tcp` and `_submissions._tcp` / `_submission._tcp` SRV records (RFC 6186), falling back to the MX host (RFC 7505) and then `imap.<domain>` / `smtp.<domain>` on the well-known ports.
@@ -20,8 +21,7 @@ https://mcp.example.org/gmail.com?email=user@gmail.com
 
 | Param | Meaning |
 |---|---|
-| `email` | (required) user's mail address |
-| `username` | login name (default: email) |
+| `username` | (required) local part (e.g. `user`) or full address matching the path domain; the mail address — and default login name — is `username@domain` |
 | `display_name` | From-header display name |
 | `imap_host`, `imap_port`, `imap_tls=1`, `imap_starttls=1`, `imap_insecure=1` | IMAP endpoint override |
 | `smtp_host`, `smtp_port`, `smtp_tls=1`, `smtp_starttls=1`, `smtp_insecure=1` | SMTP endpoint override |
@@ -31,10 +31,10 @@ https://mcp.example.org/gmail.com?email=user@gmail.com
 Example with explicit servers:
 
 ```
-https://mcp.example.org/example.org?email=user@example.org&imap_host=mail.example.org&imap_port=993&imap_tls=1&smtp_host=smtp.example.org&smtp_port=465&smtp_tls=1
+https://mcp.example.org/example.org?username=user&imap_host=mail.example.org&imap_port=993&imap_tls=1&smtp_host=smtp.example.org&smtp_port=465&smtp_tls=1
 ```
 
-`GET /` returns a JSON discovery document describing the configured accounts and the zero-config convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address and the optional overrides, submit, and the page shows the ready-to-copy endpoint URL (e.g. `https://mcp.example.org/gmail.com?email=user@gmail.com`) — the password is *never* in the URL, it goes in a request header (see above).
+`GET /` returns a JSON discovery document describing the configured accounts and the zero-config convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address and the optional overrides, submit, and the page shows the ready-to-copy endpoint URL (e.g. `https://mcp.example.org/gmail.com?username=user`) — the email is split into path + `username`, and the password is *never* in the URL, it goes in a request header (see above).
 
 ## Optional pre-configured accounts
 
@@ -83,7 +83,7 @@ Query params on a pre-configured domain are merged on top of the static entry.
 
 ## Configuration
 
-**By default the server is 0-config** (see above): any `/{domain}?email=...` works, with DNS auto-discovery and elicitation-based credentials.
+**By default the server is 0-config** (see above): any `/{domain}?username=...` works, with DNS auto-discovery and elicitation-based credentials.
 
 Optionally, pin accounts via `EMAIL_MCP_ACCOUNTS` (inline JSON or a path to a JSON file) or `~/.config/email-mcp/accounts.json`:
 
@@ -115,7 +115,7 @@ Optionally, pin accounts via `EMAIL_MCP_ACCOUNTS` (inline JSON or a path to a JS
 ```sh
 go build -o email-mcp ./cmd/email-mcp
 ./email-mcp -addr :8080
-# 0-config: https://mcp.example.org/gmail.com?email=user@gmail.com
+# 0-config: https://mcp.example.org/gmail.com?username=user
 # behind a reverse proxy that terminates TLS:
 # https://mcp.example.org  ->  http://127.0.0.1:8080
 ```
@@ -127,7 +127,7 @@ Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`), `-config` / `EMAIL_MCP_
 ```sh
 docker build -t email-mcp .
 docker run -p 8080:8080 email-mcp
-# 0-config: https://mcp.example.org/gmail.com?email=user@gmail.com
+# 0-config: https://mcp.example.org/gmail.com?username=user
 # (put a TLS-terminating reverse proxy in front for HTTPS)
 # optional env: -e EMAIL_MCP_ACCOUNTS=... -e EMAIL_MCP_AUTH_TOKEN=...
 ```
@@ -141,7 +141,7 @@ The image is a multi-stage build (golang:1.27-alpine → distroless static, nonr
   "mcpServers": {
     "gmail": {
       "type": "http",
-      "url": "https://mcp.example.org/gmail.com?email=user@gmail.com",
+      "url": "https://mcp.example.org/gmail.com?username=user",
       "headers": {
         "X-Email-Password": "${env:GMAIL_APP_PASSWORD}"
       }

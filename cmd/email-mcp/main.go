@@ -2,7 +2,7 @@
 //
 // Zero-config mode (default): any domain path is accepted, e.g.
 //
-//	https://mcp.example.org/gmail.com?email=user@gmail.com
+//	https://mcp.example.org/gmail.com?username=user
 //
 // IMAP/SMTP endpoints are auto-discovered via DNS SRV/MX records (or given
 // explicitly as query params: imap_host, imap_port, imap_tls, smtp_host, ...),
@@ -38,7 +38,7 @@ func main() {
 	byDomain := accs.ByDomain()
 
 	if len(byDomain) == 0 {
-		log.Printf("email-mcp: 0-config mode — any /{domain}?email=user@domain is accepted;")
+		log.Printf("email-mcp: 0-config mode — any /{domain}?username=user is accepted (user@domain);")
 		log.Printf("             server settings via DNS auto-discovery or query params, credentials via elicitation")
 	} else {
 		log.Printf("email-mcp: serving %d pre-configured account(s):", len(byDomain))

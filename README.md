@@ -132,7 +132,7 @@ docker run -p 8080:8080 email-mcp
 # optional env: -e EMAIL_MCP_ACCOUNTS=... -e EMAIL_MCP_AUTH_TOKEN=...
 ```
 
-The image is a multi-stage build (golang:1.27-alpine → distroless static, nonroot, `EXPOSE 8080`, entrypoint `/email-mcp`).
+The image is a multi-stage build (golang:1.27-alpine → distroless static-debian13 nonroot, `EXPOSE 8080`, entrypoint `/email-mcp`).
 
 ## Client config (VS Code Copilot)
 

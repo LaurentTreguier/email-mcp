@@ -1,0 +1,61 @@
+name: test
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+permissions: read-all
+
+jobs:
+  go:
+    name: build, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Go version comes from go.mod, so the workflow tracks the toolchain
+      # automatically (with the module cache for speed).
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: go mod tidy is clean
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: verify module checksums
+        run: go mod verify
+
+      - name: gofmt is clean
+        run: test -z "$(gofmt -l .)"
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test -count=1 ./...
+
+  docker:
+    name: docker build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: build image
+        run: docker build -t email-mcp:ci .
+
+      - name: smoke test container
+        run: |
+          docker run -d -p 18080:8080 --name email-mcp-ci email-mcp:ci
+          trap 'docker stop email-mcp-ci >/dev/null 2>&1; docker rm email-mcp-ci >/dev/null 2>&1' EXIT
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:18080/ && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:18080/ | grep -q '"service":"email-mcp"'
+          curl -sf -H 'Accept: text/html' http://127.0.0.1:18080/ | grep -q '<form'

@@ -5,6 +5,27 @@ semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
 ## Unreleased
 
+### Added
+
+- **Single-header account packing**: `Authorization: Bearer <base64url(JSON
+  account)>` packs the whole account (email, password, overrides) into one
+  auth header, for MCP clients that accept only a single auth header per
+  connection (e.g. Mistral Vibe). Different providers/accounts = different
+  connections with the same `url` and different bearer values.
+- **Built-in OAuth 2.0 authorization server** (`internal/oauthserver`): RFC
+  8414 metadata, RFC 7591 dynamic client registration, authorization-code
+  flow with PKCE (S256) and an HTML consent form, refresh-token grant
+  (rotated), and JWKS. Access tokens are RS256 JWTs whose `account` claim is
+  the full mail account, AES-256-GCM encrypted with `EMAIL_MCP_TOKEN_SECRET`
+  — one bearer token per MCP connection carries all the connection info, and
+  `/mcp` verifies it statelessly. Unauthenticated `/mcp` requests now get
+  `401` + `WWW-Authenticate: Bearer resource_metadata=...` pointing at the
+  RFC 9728 protected-resource metadata, which names this authorization
+  server.
+- The browser setup form at `/` additionally emits the packed single-header
+  bearer, and links into the OAuth consent flow. New env knobs:
+  `EMAIL_MCP_BASE_URL` (OAuth issuer) and `EMAIL_MCP_TOKEN_SECRET`.
+
 ### Changed
 
 - **Header-driven accounts**: the MCP endpoint is now a single fixed path,

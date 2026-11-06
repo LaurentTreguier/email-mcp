@@ -1,9 +1,12 @@
 // Package config defines the per-request mail account description. The
 // server is stateless: every account is fully described by the client's
-// X-Email-* request headers, never by a server-side config file or env var.
+// request (Authorization header or X-Email-* headers), never by a
+// server-side config file or env var.
 package config
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -81,6 +84,122 @@ type Account struct {
 	SentMailbox string
 	// DraftsMailbox is where drafts are stored. Defaults to "Drafts".
 	DraftsMailbox string
+}
+
+// bearerAccount is the JSON payload carried inside a single
+// "Authorization: Bearer <base64url(JSON)>" header when the client can only
+// set one auth header (e.g. Mistral Vibe): it packs the whole account setup.
+type bearerAccount struct {
+	Email         string `json:"email"`
+	Password      string `json:"password,omitempty"`
+	Username      string `json:"username,omitempty"`
+	DisplayName   string `json:"display_name,omitempty"`
+	AuthMechanism string `json:"auth_mechanism,omitempty"`
+	SentMailbox   string `json:"sent_mailbox,omitempty"`
+	DraftsMailbox string `json:"drafts_mailbox,omitempty"`
+	IMAPHost      string `json:"imap_host,omitempty"`
+	IMAPPort      int    `json:"imap_port,omitempty"`
+	IMAPTLS       *bool  `json:"imap_tls,omitempty"`
+	IMAPStartTLS  *bool  `json:"imap_starttls,omitempty"`
+	IMAPInsecure  *bool  `json:"imap_insecure,omitempty"`
+	IMAPSkipVer   *bool  `json:"imap_skip_verify,omitempty"`
+	SMTPHost      string `json:"smtp_host,omitempty"`
+	SMTPPort      int    `json:"smtp_port,omitempty"`
+	SMTPTLS       *bool  `json:"smtp_tls,omitempty"`
+	SMTPStartTLS  *bool  `json:"smtp_starttls,omitempty"`
+	SMTPInsecure  *bool  `json:"smtp_insecure,omitempty"`
+	SMTPSeppVer   *bool  `json:"smtp_skip_verify,omitempty"`
+}
+
+// EncodeBearer packs the account as a base64url(JSON) string suitable for a
+// single "Authorization: Bearer <value>" header.
+func (a *Account) EncodeBearer() string {
+	b := bearerAccount{
+		Email:         a.Email,
+		Password:      a.Password,
+		Username:      a.Username,
+		DisplayName:   a.DisplayName,
+		AuthMechanism: a.AuthMechanism,
+		SentMailbox:   a.SentMailbox,
+		DraftsMailbox: a.DraftsMailbox,
+		IMAPHost:      a.IMAP.Host,
+		IMAPPort:      a.IMAP.Port,
+		SMTPHost:      a.SMTP.Host,
+		SMTPPort:      a.SMTP.Port,
+	}
+	boolp := func(v bool) *bool { return &v }
+	if a.IMAP.TLS {
+		b.IMAPTLS = boolp(true)
+	} else if a.IMAP.Insecure {
+		b.IMAPInsecure = boolp(true)
+	} else {
+		b.IMAPStartTLS = boolp(true)
+	}
+	if a.IMAP.InsecureSkipVerify {
+		b.IMAPSkipVer = boolp(true)
+	}
+	if a.SMTP.TLS {
+		b.SMTPTLS = boolp(true)
+	} else if a.SMTP.Insecure {
+		b.SMTPInsecure = boolp(true)
+	} else {
+		b.SMTPStartTLS = boolp(true)
+	}
+	if a.SMTP.InsecureSkipVerify {
+		b.SMTPSeppVer = boolp(true)
+	}
+	raw, _ := json.Marshal(b)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+// DecodeBearerAccount parses a base64url(JSON) bearer token into an Account.
+// It returns nil (not an error) when the token is not a packed account, so
+// callers can fall through to other auth interpretations.
+func DecodeBearerAccount(token string) *Account {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return nil
+	}
+	var b bearerAccount
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return nil
+	}
+	if b.Email == "" {
+		return nil
+	}
+	acc := &Account{
+		Email:         b.Email,
+		Password:      b.Password,
+		Username:      b.Username,
+		DisplayName:   b.DisplayName,
+		AuthMechanism: b.AuthMechanism,
+		SentMailbox:   b.SentMailbox,
+		DraftsMailbox: b.DraftsMailbox,
+	}
+	tlsMode := func(t, st, in *bool) string {
+		switch {
+		case in != nil && *in:
+			return "insecure"
+		case t != nil && *t:
+			return "tls"
+		case st != nil && *st:
+			return "starttls"
+		}
+		return ""
+	}
+	acc.SetIMAP(b.IMAPHost, b.IMAPPort, tlsMode(b.IMAPTLS, b.IMAPStartTLS, b.IMAPInsecure))
+	acc.SetSMTP(b.SMTPHost, b.SMTPPort, tlsMode(b.SMTPTLS, b.SMTPStartTLS, b.SMTPInsecure))
+	if b.IMAPSkipVer != nil && *b.IMAPSkipVer {
+		acc.IMAP.InsecureSkipVerify = true
+	}
+	if b.SMTPSeppVer != nil && *b.SMTPSeppVer {
+		acc.SMTP.InsecureSkipVerify = true
+	}
+	if acc.Password != "" && acc.AuthMechanism == "" {
+		acc.AuthMechanism = "plain"
+	}
+	acc.Normalize()
+	return acc
 }
 
 // Domain returns the domain part of the account email (drives DNS
@@ -165,21 +284,29 @@ func (a *Account) SetSMTP(host string, port int, tlsMode string) {
 	a.SMTP.Port = port
 }
 
-// FromHeaders builds an account from the client's X-Email-* request headers.
-// The MCP endpoint URL is fixed; the whole account setup travels in the
-// headers of each request (this is how MCP clients with named connections,
-// e.g. Mistral Vibe or VS Code mcp.json "headers", carry per-connection
-// auth).
+// FromHeaders builds an account from the client's request headers. The MCP
+// endpoint URL is fixed; the whole account setup travels in the headers of
+// each request (this is how MCP clients with named connections, e.g. VS Code
+// mcp.json "headers", carry per-connection auth).
 //
-// Required: X-Email-Address (full mail address, e.g. user@gmail.com).
-// Credential: X-Email-Password, or Authorization: ****** (token used as the
-// mail credential, e.g. XOAUTH2) — the password is never in the URL.
-// Optional overrides (empty header = unset, DNS auto-discovery applies):
-// X-Email-Username, X-Email-Display-Name, X-Email-Auth-Mechanism,
-// X-Email-Sent-Mailbox, X-Email-Drafts-Mailbox, and the IMAP/SMTP set:
-// X-Email-IMAP-Host/-Port/-TLS/-STARTTLS/-Insecure/-Skip-Verify and the
-// X-Email-SMTP-* twins.
+// Two header shapes are accepted, tried in order:
+//  1. Authorization: Bearer <base64url(JSON account)> — a single header
+//     packing the whole account (for clients like Mistral Vibe that only
+//     accept one auth header). Also what our own OAuth flow issues.
+//  2. X-Email-Address (required full mail address, e.g. user@gmail.com) plus
+//     optional X-Email-* overrides; credential via X-Email-Password or a raw
+//     Authorization: ****** (token used as the mail credential, e.g. XOAUTH2).
+//
+// The password is never in the URL. Unset server settings are auto-discovered
+// via DNS by the caller.
 func FromHeaders(h http.Header) (*Account, error) {
+	// Single-header mode first: a bearer token that decodes to a packed
+	// account wins over any X-Email-* headers.
+	if a := h.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
+		if acc := DecodeBearerAccount(strings.TrimPrefix(a, "Bearer ")); acc != nil {
+			return acc, nil
+		}
+	}
 	get := func(key string) string { return strings.TrimSpace(h.Get(key)) }
 	getBool := func(key string) bool {
 		v := get(key)

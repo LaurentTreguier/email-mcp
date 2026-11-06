@@ -1,30 +1,33 @@
 # email-mcp
 
-A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP**. The server is **stateless** and has a **single fixed endpoint** — the whole account setup travels in the client's request headers, which is how MCP clients with named connections (Mistral Vibe, VS Code `mcp.json`, Claude Desktop, ...) carry per-connection auth:
+A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP**. The server is **stateless** and has a **single fixed endpoint** — the whole account setup travels in the client's request auth, which is how MCP clients with named connections (Mistral Vibe, VS Code `mcp.json`, Claude Desktop, ...) carry per-connection auth:
 
 ```
 POST https://mcp.example.org/mcp
-X-Email-Address: user@gmail.com
-X-Email-Password: <app-password>        # or Authorization: ******<oauth2-token>
+Authorization: ******   # see the three auth shapes below
 ```
 
 Current release: **v0.1.0** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Usage
 
-The MCP endpoint URL is always the same; each named connection differs only by its headers:
+The MCP endpoint URL is always the same; each named connection differs only by its auth:
 
 ```
 https://mcp.example.org/mcp
 ```
 
-- **`X-Email-Address`** (required): the full mail address, e.g. `user@gmail.com`. Its domain drives DNS auto-discovery.
-- **Credential** (setup-time auth, no elicitation needed):
-  - `X-Email-Password: <password-or-app-password>` — custom header, works with any client that supports custom headers
-  - `Authorization: ****** — OAuth-style bearer; the token is used directly as the mail credential (XOAUTH2, the default mechanism when only a Bearer token is given)
-  - `/.well-known/oauth-protected-resource` (RFC 9728) is served so OAuth-aware clients can discover the accepted methods
-  - if neither header is present, the server falls back to asking the user via MCP elicitation on the first tool call
+Three auth shapes are accepted on `/mcp` (tried in order):
+
+1. **OAuth bearer (recommended)** — email-mcp is its own OAuth 2.0 authorization server. Run the flow once (metadata at `/.well-known/oauth-authorization-server`, dynamic registration at `/oauth/register`, consent at `/oauth/authorize`, token at `/oauth/token`, JWKS at `/.well-known/jwks.json`); the issued access token is an RS256 JWT carrying the whole account (AES-256-GCM encrypted claim), so the client only stores **one bearer token** per connection. `/.well-known/oauth-protected-resource` (RFC 9728) advertises this to OAuth-aware clients; unauthenticated `/mcp` requests get a `401` + `WWW-Authenticate` challenge pointing at it.
+2. **Single packed bearer** — for clients that accept only one auth header (e.g. Mistral Vibe): `Authorization: Bearer <base64url(JSON account)>` with `{"email":..., "password":..., "imap_host":..., ...}`.
+3. **`X-Email-*` custom headers** — `X-Email-Address: user@gmail.com` (required) + `X-Email-Password: <app-password>` (or a raw `Authorization: Bearer` token used as an XOAUTH2 mail credential), plus optional overrides below.
+
+The setup form at `/` (browsers) generates both the header config and the packed single-header bearer.
+
+- **Address**: the full mail address, e.g. `user@gmail.com`. Its domain drives DNS auto-discovery.
 - **Server settings are auto-discovered** from the address domain via DNS: `_imaps._tcp` / `_imap._tcp` and `_submissions._tcp` / `_submission._tcp` SRV records (RFC 6186), falling back to the MX host (RFC 7505) and then `imap.<domain>` / `smtp.<domain>` on the well-known ports.
+- If no credential is present at all, the server falls back to MCP elicitation on the first tool call.
 
 Optional header overrides (unset = auto-discovered via DNS):
 
@@ -37,7 +40,7 @@ Optional header overrides (unset = auto-discovered via DNS):
 | `X-Email-SMTP-Host`, `X-Email-SMTP-Port`, `X-Email-SMTP-TLS: true`, `X-Email-SMTP-STARTTLS: true`, `X-Email-SMTP-Insecure: true`, `X-Email-SMTP-Skip-Verify: true` | SMTP endpoint override |
 | `X-Email-Sent-Mailbox`, `X-Email-Drafts-Mailbox` | folder names (default `Sent` / `Drafts`) |
 
-`GET /` returns a JSON discovery document describing the convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address and the optional overrides, submit, and the page shows the fixed endpoint URL plus a ready-to-copy client config with the corresponding `X-Email-*` headers (the password is *never* in the URL or the generated config — it stays a `${env:...}` placeholder).
+`GET /` returns a JSON discovery document describing the convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address (and password for the packed-bearer variant) and the optional overrides, submit, and the page shows the fixed endpoint URL, a ready-to-copy client config with the corresponding `X-Email-*` headers (password stays an `${env:...}` placeholder there), and a single packed `Authorization: Bearer base64url(JSON)` value for single-header clients. There is also a link into the OAuth consent flow at `/oauth/authorize`.
 
 ## Features
 
@@ -65,9 +68,20 @@ Optional header overrides (unset = auto-discovered via DNS):
 
 ## Configuration
 
-There is **no server-side account configuration** — the server is stateless. Per request, the account is built from the `X-Email-*` request headers (table above); anything unset is auto-discovered via DNS, and the credential comes from `X-Email-Password` / `Authorization: Bearer` (else MCP elicitation).
+There is **no server-side account configuration** — the server is stateless. Per request, the account is built from the bearer token (OAuth JWT or packed base64 JSON) or the `X-Email-*` headers (table above); anything unset is auto-discovered via DNS, and a missing credential falls back to MCP elicitation.
 
-The only server-level settings are deployment knobs: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`) and the optional endpoint gate `EMAIL_MCP_AUTH_TOKEN` (if set, `Authorization: Bearer` must match this token and is then *not* used as a mail credential — use `X-Email-Password` for that).
+Server-level settings are deployment knobs only:
+
+| Env / flag | Meaning |
+|---|---|
+| `-addr` / `EMAIL_MCP_ADDR` | listen address (default `:8080`) |
+| `EMAIL_MCP_BASE_URL` | public base URL used as the OAuth issuer (default: derived per request from scheme+host) |
+| `EMAIL_MCP_TOKEN_SECRET` | 32-byte secret (base64 or raw) encrypting the account claim inside OAuth access tokens; random per start if unset (tokens don't survive restarts) |
+| `EMAIL_MCP_AUTH_TOKEN` | optional endpoint gate: `Authorization: Bearer` must match it and is then *not* a mail credential |
+
+### OAuth endpoints
+
+`GET /.well-known/oauth-authorization-server` (RFC 8414) · `GET /.well-known/jwks.json` · `POST /oauth/register` (RFC 7591 DCR) · `GET|POST /oauth/authorize` (consent form; PKCE S256 required) · `POST /oauth/token` (`authorization_code` + `refresh_token` grants; access tokens are RS256 JWTs, 24h TTL, embedding the AES-encrypted account).
 
 ## Run
 
@@ -105,12 +119,19 @@ The image is a multi-stage build (golang:1.27-alpine → distroless static-debia
         "X-Email-Address": "user@gmail.com",
         "X-Email-Password": "${env:GMAIL_APP_PASSWORD}"
       }
+    },
+    "work": {
+      "type": "http",
+      "url": "https://mcp.example.org/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:EMAIL_MCP_WORK_TOKEN}"
+      }
     }
   }
 }
 ```
 
-(or `"Authorization": "******"` with `"X-Email-Auth-Mechanism": "xoauth2"` for an OAuth2 access token). Multiple connections to different accounts are just multiple entries with the same `url` and different headers.
+The `work` connection uses a token issued by the built-in OAuth flow (or a packed base64 JSON account); the `gmail` one uses raw `X-Email-*` headers. Multiple connections to different accounts are just multiple entries with the same `url` and different auth.
 
 ## Development
 
@@ -120,7 +141,8 @@ go test ./...   # unit tests against in-memory fake IMAP/SMTP servers + end-to-e
 
 ## Security notes
 
-- Credentials are carried only by client request headers (or elicitation); the server stores nothing and never logs them, and they never appear in URLs.
-- TLS by default; the `X-Email-*-Insecure` / `X-Email-*-Skip-Verify` headers are explicit opt-ins for local testing.
+- Credentials are carried only by client request auth (bearer token or `X-Email-*` headers, or elicitation); the server keeps no account state and never logs them, and they never appear in URLs.
+- OAuth access tokens are RS256 JWTs whose account claim is AES-256-GCM encrypted with `EMAIL_MCP_TOKEN_SECRET`; refresh tokens are random and rotated on use.
+- TLS by default; the `*-Insecure` / `*-Skip-Verify` options are explicit opt-ins for local testing.
 - The HTTP endpoint can be gated with a deployment-level bearer token (`EMAIL_MCP_AUTH_TOKEN`).
 - Destructive tools are annotated (`delete_messages` has `destructiveHint`); keep a human in the loop in your client.

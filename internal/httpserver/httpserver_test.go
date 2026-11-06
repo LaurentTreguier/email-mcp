@@ -2,10 +2,14 @@ package httpserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -64,12 +68,13 @@ func TestDiscoveryEndpoint(t *testing.T) {
 	}
 }
 
-func TestMissingAddressReturns400(t *testing.T) {
+func TestMissingCredentialReturns401WithChallenge(t *testing.T) {
 	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	// POST an initialize request without the X-Email-Address header; expect a 400.
+	// POST an initialize request without any credential; expect a 401 with
+	// a WWW-Authenticate challenge pointing at the protected-resource metadata.
 	req, _ := http.NewRequest("POST", srv.URL+MCPEndpoint, strings.NewReader(
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -79,8 +84,38 @@ func TestMissingAddressReturns400(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing credential, got %d", resp.StatusCode)
+	}
+	if wa := resp.Header.Get("WWW-Authenticate"); !strings.Contains(wa, "resource_metadata") || !strings.Contains(wa, "/.well-known/oauth-protected-resource") {
+		t.Fatalf("expected WWW-Authenticate challenge with resource_metadata, got %q", wa)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Bearer") {
+		t.Fatalf("expected error to mention the Bearer options: %s", body)
+	}
+}
+
+func TestMalformedAddressReturns400(t *testing.T) {
+	h := New()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// Address header present but invalid, plus a password: 400 (bad account
+	// description), not 401.
+	req, _ := http.NewRequest("POST", srv.URL+MCPEndpoint, strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set(config.HeaderAddress, "not-an-address")
+	req.Header.Set(config.HeaderPassword, "secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 for missing address header, got %d", resp.StatusCode)
+		t.Fatalf("expected 400 for invalid address, got %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), config.HeaderAddress) {
@@ -192,8 +227,8 @@ func TestMCPSessionWithElicitation(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	// No credential header: the server must ask via elicitation on the
-	// first tool call, then talk to the fake IMAP server.
+	// Address header but no credential: the server must ask via elicitation
+	// on the first tool call, then talk to the fake IMAP server.
 	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -377,8 +412,234 @@ func TestProtectedResourceMetadata(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 || !strings.Contains(string(body), `"custom_headers"`) || !strings.Contains(string(body), config.HeaderAddress) {
+	if resp.StatusCode != 200 || !strings.Contains(string(body), `"authorization_servers"`) || !strings.Contains(string(body), config.HeaderAddress) {
 		t.Fatalf("unexpected metadata: %d %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "/mcp") {
+		t.Fatalf("metadata should name the /mcp resource: %s", body)
+	}
+}
+
+// TestPackedBearerAccount: the whole account in a single Authorization:
+// Bearer base64url(JSON) header — the shape clients with only one auth
+// header (e.g. Mistral Vibe) use.
+func TestPackedBearerAccount(t *testing.T) {
+	if startFakeIMAP == nil {
+		t.Skip("no fake IMAP server wired")
+	}
+	addr, cleanup := startFakeIMAP(t)
+	defer cleanup()
+	_, port := splitAddr(addr)
+
+	h := New()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	acc := &config.Account{
+		Email:    "user@example.com",
+		Password: "secret",
+		IMAP:     config.IMAPConfig{Host: "127.0.0.1", Port: port, Insecure: true},
+		SMTP:     config.SMTPConfig{Host: "127.0.0.1", Port: 25, Insecure: true},
+	}
+	headers := headerTransport{
+		"Authorization": "Bearer " + acc.EncodeBearer(),
+	}
+
+	ctx := context.Background()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   srv.URL + MCPEndpoint,
+		HTTPClient: &http.Client{Transport: headers},
+	}
+	cs, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_mailboxes", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("expected success with packed bearer, got: %+v", res.Content)
+	}
+}
+
+// TestOAuthFlow exercises the built-in authorization server end to end:
+// metadata → DCR → authorize (consent POST) → token (PKCE) → MCP call with
+// the issued JWT.
+func TestOAuthFlow(t *testing.T) {
+	if startFakeIMAP == nil {
+		t.Skip("no fake IMAP server wired")
+	}
+	addr, cleanup := startFakeIMAP(t)
+	defer cleanup()
+	_, port := splitAddr(addr)
+
+	h := New()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// 1. Authorization server metadata (RFC 8414).
+	resp, err := http.Get(srv.URL + "/.well-known/oauth-authorization-server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta struct {
+		Issuer                string `json:"issuer"`
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+		TokenEndpoint         string `json:"token_endpoint"`
+		RegistrationEndpoint  string `json:"registration_endpoint"`
+		JWKSURI               string `json:"jwks_uri"`
+	}
+	json.NewDecoder(resp.Body).Decode(&meta) //nolint:errcheck
+	resp.Body.Close()
+	if meta.TokenEndpoint == "" || meta.RegistrationEndpoint == "" {
+		t.Fatalf("bad auth server metadata: %+v", meta)
+	}
+	// JWKS must be served.
+	resp, err = http.Get(srv.URL + "/.well-known/jwks.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"kty":"RSA"`) {
+		t.Fatalf("bad jwks: %s", body)
+	}
+
+	// 2. Dynamic client registration (RFC 7591).
+	regBody := strings.NewReader(`{"redirect_uris":["http://localhost:9999/callback"],"client_name":"test"}`)
+	req, _ := http.NewRequest("POST", srv.URL+"/oauth/register", regBody)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	json.NewDecoder(resp.Body).Decode(&reg) //nolint:errcheck
+	resp.Body.Close()
+	if reg.ClientID == "" || reg.ClientSecret == "" {
+		t.Fatalf("bad registration response: %+v", reg)
+	}
+
+	// 3. Authorize: GET the consent form, then POST it.
+	verifier := "test-verifier-0123456789abcdef"
+	challengeBytes := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(challengeBytes[:])
+	authURL := srv.URL + "/oauth/authorize?response_type=code&client_id=" + url.QueryEscape(reg.ClientID) +
+		"&redirect_uri=" + url.QueryEscape("http://localhost:9999/callback") +
+		"&state=xyz&scope=email&code_challenge=" + challenge + "&code_challenge_method=S256"
+	resp, err = http.Get(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	formPage, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(formPage), "Authorize") {
+		t.Fatalf("expected consent form, got %d: %s", resp.StatusCode, formPage)
+	}
+	consent := url.Values{
+		"client_id":             {reg.ClientID},
+		"redirect_uri":          {"http://localhost:9999/callback"},
+		"state":                 {"xyz"},
+		"scope":                 {"email"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"email":                 {"user@example.com"},
+		"password":              {"secret"},
+		"imap_host":             {"127.0.0.1"},
+		"imap_port":             {fmt.Sprint(port)},
+		"imap_insecure":         {"1"},
+		"smtp_host":             {"127.0.0.1"},
+		"smtp_port":             {"25"},
+		"smtp_insecure":         {"1"},
+	}
+	noRedirect := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err = noRedirect.PostForm(srv.URL+"/oauth/authorize", consent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc := resp.Header.Get("Location")
+	errBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || loc == "" {
+		t.Fatalf("expected 303 redirect with code, got %d loc=%q body=%s", resp.StatusCode, loc, errBody)
+	}
+	lu, _ := url.Parse(loc)
+	code := lu.Query().Get("code")
+	if code == "" || lu.Query().Get("state") != "xyz" {
+		t.Fatalf("bad redirect: %s", loc)
+	}
+
+	// 4. Token exchange (PKCE).
+	tokForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"http://localhost:9999/callback"},
+		"code_verifier": {verifier},
+		"client_id":     {reg.ClientID},
+		"client_secret": {reg.ClientSecret},
+	}
+	resp, err = http.PostForm(srv.URL+"/oauth/token", tokForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tok struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	json.NewDecoder(resp.Body).Decode(&tok) //nolint:errcheck
+	resp.Body.Close()
+	if tok.AccessToken == "" || tok.RefreshToken == "" || tok.TokenType != "Bearer" {
+		t.Fatalf("bad token response: %+v", tok)
+	}
+
+	// 5. Use the access token against /mcp.
+	ctx := context.Background()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   srv.URL + MCPEndpoint,
+		HTTPClient: &http.Client{Transport: headerTransport{"Authorization": "Bearer " + tok.AccessToken}},
+	}
+	cs, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("connect with OAuth token: %v", err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_mailboxes", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("expected success with OAuth-issued token, got: %+v", res.Content)
+	}
+
+	// 6. Refresh grant issues a new access token.
+	refForm := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {tok.RefreshToken},
+		"client_id":     {reg.ClientID},
+		"client_secret": {reg.ClientSecret},
+	}
+	resp, err = http.PostForm(srv.URL+"/oauth/token", refForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tok2 struct {
+		AccessToken string `json:"access_token"`
+	}
+	json.NewDecoder(resp.Body).Decode(&tok2) //nolint:errcheck
+	resp.Body.Close()
+	if tok2.AccessToken == "" || tok2.AccessToken == tok.AccessToken {
+		t.Fatalf("expected a fresh access token from refresh, got %+v", tok2)
 	}
 }
 

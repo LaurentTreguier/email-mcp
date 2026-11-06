@@ -28,7 +28,13 @@ func main() {
 	flag.Parse()
 
 	log.Printf("email-mcp: stateless — single MCP endpoint at /mcp;")
-	log.Printf("             account via X-Email-* headers, server settings via DNS auto-discovery or headers, credentials via header or elicitation")
+	log.Printf("             account via Authorization bearer (OAuth JWT or packed base64 JSON) or X-Email-* headers,")
+	log.Printf("             server settings via DNS auto-discovery or headers, credentials via header or elicitation")
+	if v := os.Getenv("EMAIL_MCP_BASE_URL"); v != "" {
+		log.Printf("             OAuth authorization server issuer: %s", v)
+	} else {
+		log.Printf("             OAuth authorization server issuer derived per request (set EMAIL_MCP_BASE_URL to fix it)")
+	}
 
 	srv := &http.Server{
 		Addr:              *addr,

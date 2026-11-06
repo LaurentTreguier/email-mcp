@@ -11,7 +11,11 @@ https://mcp.example.org/gmail.com?email=user@gmail.com
 ```
 
 - **Server settings are auto-discovered** from DNS: `_imaps._tcp` / `_imap._tcp` and `_submissions._tcp` / `_submission._tcp` SRV records (RFC 6186), falling back to the MX host (RFC 7505) and then `imap.<domain>` / `smtp.<domain>` on the well-known ports.
-- **Credentials are requested from the user** via MCP elicitation (the client pops a form asking for the password / app-password / OAuth token) — secrets are never put in URLs or config.
+- **Credentials come from the request headers** (setup-time auth, no elicitation needed):
+  - `X-Email-Password: <password-or-app-password>` — custom header, works with any client that supports custom headers
+  - `Authorization: Bearer <token>` — OAuth-style bearer; the token is used directly as the mail credential (e.g. an XOAUTH2 access token)
+  - `/.well-known/oauth-protected-resource` (RFC 9728) is served so OAuth-aware clients can discover the accepted methods
+  - if neither header is present, the server falls back to asking the user via MCP elicitation on the first tool call
 - Optional query-param overrides:
 
 | Param | Meaning |
@@ -101,10 +105,10 @@ Optionally, pin accounts via `EMAIL_MCP_ACCOUNTS` (inline JSON or a path to a JS
 }
 ```
 
-- `password_env` names an env var holding the password / app-password / OAuth2 token — the secret itself never appears in the config file. If no password is configured at all, the server asks the user via MCP elicitation.
+- `password_env` names an env var holding the password / app-password / OAuth2 token — the secret itself never appears in the config file. If no password is configured and no credential header is sent, the server asks the user via MCP elicitation.
 - `auth_mechanism`: `plain` (default), `login`, or `xoauth2`.
 - IMAP/SMTP: `tls: true` = implicit TLS (993/465); otherwise STARTTLS (143/587). `insecure: true` skips TLS entirely (local testing only).
-- Optional `EMAIL_MCP_AUTH_TOKEN`: if set, all HTTP requests must carry `Authorization: Bearer <token>`.
+- Optional `EMAIL_MCP_AUTH_TOKEN`: if set, the `Authorization: Bearer` header must match this server-level token (it is then *not* used as a mail credential); use `X-Email-Password` for the mail credential in that case.
 
 ## Run
 
@@ -125,11 +129,16 @@ Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`), `-config` / `EMAIL_MCP_
   "mcpServers": {
     "gmail": {
       "type": "http",
-      "url": "https://mcp.example.org/gmail.com?email=user@gmail.com"
+      "url": "https://mcp.example.org/gmail.com?email=user@gmail.com",
+      "headers": {
+        "X-Email-Password": "${env:GMAIL_APP_PASSWORD}"
+      }
     }
   }
 }
 ```
+
+(or `"Authorization": "Bearer ${env:GMAIL_OAUTH_TOKEN"}` with `auth_mechanism=xoauth2`)
 
 ## Development
 

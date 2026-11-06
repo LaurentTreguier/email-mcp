@@ -2,6 +2,8 @@
 
 A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP**. The server is **stateless**: there is no server-side configuration at all — every request carries the full account description (path + query params + credential header).
 
+Current release: **v0.1.0** (see [CHANGELOG.md](CHANGELOG.md)).
+
 ## Usage
 
 Point the client at the domain of the mail account (the URL path) and pass the user as a query param — the mail address is `username@domain`:

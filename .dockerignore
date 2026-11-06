@@ -1,0 +1,5 @@
+.git
+*.exe
+email-mcp
+Dockerfile
+.dockerignore

@@ -155,6 +155,57 @@ func TestMCPSessionOverHTTP(t *testing.T) {
 	}
 }
 
+func TestMCPSessionViaQueryParams(t *testing.T) {
+	if startFakeIMAP == nil {
+		t.Skip("no fake IMAP server wired")
+	}
+	addr, cleanup := startFakeIMAP(t)
+	defer cleanup()
+	_, port := splitAddr(addr)
+
+	// 0-config: no static accounts at all; everything via query params,
+	// pointing at the fake in-memory IMAP server.
+	h := New(map[string]*config.Account{})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	ctx := context.Background()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ElicitationHandler: func(ctx context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{
+				Action:  "accept",
+				Content: map[string]any{"password": "secret"},
+			}, nil
+		},
+	})
+	endpoint := fmt.Sprintf("%s/example.com?email=user@example.com&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
+	transport := &mcp.StreamableClientTransport{Endpoint: endpoint}
+	cs, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer cs.Close()
+
+	// list_mailboxes should trigger elicitation (password "secret") and then
+	// talk to the fake IMAP server.
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "list_mailboxes",
+		Arguments: map[string]any{"pattern": "*"},
+	})
+	if err != nil {
+		t.Fatalf("call list_mailboxes: %v", err)
+	}
+	if res.IsError {
+		var sb strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*mcp.TextContent); ok {
+				sb.WriteString(tc.Text)
+			}
+		}
+		t.Fatalf("list_mailboxes error: %s", sb.String())
+	}
+}
+
 func splitAddr(addr string) (string, int) {
 	host, portStr, _ := strings.Cut(addr, ":")
 	var port int

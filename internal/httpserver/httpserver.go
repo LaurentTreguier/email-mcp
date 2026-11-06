@@ -1,7 +1,13 @@
 // Package httpserver exposes mail accounts over MCP Streamable HTTP.
 //
-// Each configured account is served at /{domain}, where domain is the domain
-// part of the account's email address, e.g. https://mcp.example.org/gmail.com.
+// Accounts can come from two sources, merged together:
+//   - static config (env EMAIL_MCP_ACCOUNTS or accounts.json), served at
+//     /{domain}
+//   - per-request query params, e.g.
+//     /gmail.com?email=user@gmail.com&imap_host=imap.gmail.com&imap_port=993&imap_tls=1
+//     Server settings not given in the query are discovered automatically via
+//     DNS SRV/MX records, and credentials are requested from the user via MCP
+//     elicitation — so a bare /gmail.com?email=user@gmail.com is enough.
 package httpserver
 
 import (
@@ -15,16 +21,49 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"email-mcp/internal/config"
+	"email-mcp/internal/discovery"
 	"email-mcp/internal/mcpserver"
 )
 
 // New returns an http.Handler routing /{domain} to the MCP Streamable HTTP
 // endpoint of the matching account. The root path returns a JSON discovery
-// document listing the available account paths.
+// document describing 0-config usage.
 func New(byDomain map[string]*config.Account) http.Handler {
 	var mu sync.Mutex
 	servers := map[string]*mcp.Server{}
 	stopCh := make(chan struct{})
+
+	// serverFor builds (or reuses) the MCP server for a domain + query params.
+	// On failure it records the error so getServer can report it in the response.
+	var lastErr error
+	serverFor := func(domain string, q map[string][]string) *mcp.Server {
+		// Cache key: domain plus any explicit server overrides in the query.
+		key := domain + "|" + cacheKey(q)
+		mu.Lock()
+		defer mu.Unlock()
+		if s, ok := servers[key]; ok {
+			return s
+		}
+
+		var acc *config.Account
+		if a, ok := byDomain[domain]; ok && len(q) == 0 {
+			acc = a // fully configured static account
+		} else {
+			var err error
+			acc, err = buildAccount(domain, q, byDomain[domain])
+			if err != nil {
+				lastErr = err
+				return nil
+			}
+		}
+
+		s := mcpserver.New(acc)
+		if sess := mcpserver.SessionOf(s); sess != nil {
+			go sess.KeepAlive(stopCh)
+		}
+		servers[key] = s
+		return s
+	}
 
 	getServer := func(r *http.Request) *mcp.Server {
 		domain := strings.Trim(r.URL.Path, "/")
@@ -32,25 +71,32 @@ func New(byDomain map[string]*config.Account) http.Handler {
 			return nil
 		}
 		domain = strings.ToLower(domain)
-		acc, ok := byDomain[domain]
-		if !ok {
-			return nil
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		s, ok := servers[domain]
-		if !ok {
-			s = mcpserver.New(acc)
-			if sess := mcpserver.SessionOf(s); sess != nil {
-				go sess.KeepAlive(stopCh)
-			}
-			servers[domain] = s
-		}
-		return s
+		return serverFor(domain, r.URL.Query())
 	}
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(getServer, &mcp.StreamableHTTPOptions{
 		Logger: slog.Default(),
+	})
+
+	// Wrap so that account-build failures surface as a useful 400 response
+	// instead of the SDK's generic "no server available".
+	var wrapped http.Handler
+	wrapped = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		domain := strings.Trim(r.URL.Path, "/")
+		if domain != "" && !strings.Contains(domain, "/") && r.Method == http.MethodPost {
+			mu.Lock()
+			lastErr = nil
+			mu.Unlock()
+			getServer(r) // trigger build to populate lastErr
+			mu.Lock()
+			err := lastErr
+			mu.Unlock()
+			if err != nil {
+				http.Error(w, "cannot set up account: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		mcpHandler.ServeHTTP(w, r)
 	})
 
 	authToken := os.Getenv("EMAIL_MCP_AUTH_TOKEN")
@@ -71,16 +117,88 @@ func New(byDomain map[string]*config.Account) http.Handler {
 			for domain := range byDomain {
 				domains = append(domains, domain)
 			}
-			fmt.Fprintf(w, `{"service":"email-mcp","accounts":[`)
+			fmt.Fprintf(w, `{"service":"email-mcp","configured_accounts":[`)
 			for i, d := range domains {
 				if i > 0 {
 					fmt.Fprint(w, ",")
 				}
 				fmt.Fprintf(w, `"/%s"`, d)
 			}
-			fmt.Fprint(w, `]}`)
+			fmt.Fprint(w, `],"zero_config":"/{domain}?email=user@domain — IMAP/SMTP settings are auto-discovered via DNS SRV/MX, credentials are requested from the user via MCP elicitation. Optional overrides: imap_host, imap_port, imap_tls, imap_starttls, smtp_host, smtp_port, smtp_tls, smtp_starttls, username, display_name, auth_mechanism, sent_mailbox, drafts_mailbox"}`)
 			return
 		}
-		mcpHandler.ServeHTTP(w, r)
+		wrapped.ServeHTTP(w, r)
 	})
+}
+
+// cacheKey builds a stable cache key from the server-related query params.
+func cacheKey(q map[string][]string) string {
+	keys := []string{"email", "username", "imap_host", "imap_port", "imap_tls", "imap_starttls", "smtp_host", "smtp_port", "smtp_tls", "smtp_starttls", "auth_mechanism"}
+	var parts []string
+	for _, k := range keys {
+		if v := q[k]; len(v) > 0 {
+			parts = append(parts, k+"="+v[0])
+		}
+	}
+	return strings.Join(parts, "&")
+}
+
+// buildAccount merges: static config account for the domain (if any) as the
+// base, query params on top, and DNS auto-discovery for anything still unset.
+func buildAccount(domain string, q map[string][]string, base *config.Account) (*config.Account, error) {
+	acc, err := config.FromQuery(q)
+	if err != nil {
+		// No email param: maybe a static account exists for this domain.
+		if base != nil {
+			cpy := *base
+			return &cpy, nil
+		}
+		return nil, err
+	}
+
+	// Fill gaps from the static account.
+	if base != nil {
+		if acc.DisplayName == "" {
+			acc.DisplayName = base.DisplayName
+		}
+		if acc.AuthMechanism == "" {
+			acc.AuthMechanism = base.AuthMechanism
+		}
+		if acc.PasswordEnv == "" && base.PasswordEnv != "" {
+			acc.PasswordEnv = base.PasswordEnv
+		}
+		if acc.Password == "" && base.Password != "" {
+			acc.Password = base.Password
+		}
+		if acc.SentMailbox == "Sent" && base.SentMailbox != "Sent" {
+			acc.SentMailbox = base.SentMailbox
+		}
+		if acc.DraftsMailbox == "Drafts" && base.DraftsMailbox != "Drafts" {
+			acc.DraftsMailbox = base.DraftsMailbox
+		}
+	}
+
+	// Auto-discover any missing server settings via DNS.
+	needDiscovery := acc.IMAP.Host == "" || acc.SMTP.Host == ""
+	if needDiscovery {
+		discovered, derr := discovery.Discover(domain)
+		if derr != nil {
+			return nil, fmt.Errorf("auto-discovery for %s failed: %w (pass imap_host/imap_port/smtp_host/smtp_port explicitly)", domain, derr)
+		}
+		if acc.IMAP.Host == "" {
+			mode := "tls"
+			if !discovered.IMAPTLS {
+				mode = "starttls"
+			}
+			acc.SetIMAP(discovered.IMAPHost, discovered.IMAPPort, mode)
+		}
+		if acc.SMTP.Host == "" {
+			mode := "tls"
+			if !discovered.SMTPTLS {
+				mode = "starttls"
+			}
+			acc.SetSMTP(discovered.SMTPHost, discovered.SMTPPort, mode)
+		}
+	}
+	return acc, nil
 }

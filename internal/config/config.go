@@ -85,6 +85,8 @@ const EnvVarName = "EMAIL_MCP_ACCOUNTS"
 
 // Load reads accounts from the EMAIL_MCP_ACCOUNTS env var if set, otherwise
 // from the config file at path (default ~/.config/email-mcp/accounts.json).
+// A missing config is NOT an error in 0-config mode: an empty Accounts is
+// returned and accounts can be created per-request from query params.
 func Load(path string) (*Accounts, error) {
 	if v := os.Getenv(EnvVarName); v != "" {
 		if strings.HasPrefix(strings.TrimSpace(v), "{") {
@@ -99,13 +101,16 @@ func Load(path string) (*Accounts, error) {
 	if path == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return nil, err
+			return &Accounts{}, nil
 		}
 		path = filepath.Join(home, ".config", "email-mcp", "accounts.json")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading accounts file %s (set %s to provide accounts): %w", path, EnvVarName, err)
+		if os.IsNotExist(err) {
+			return &Accounts{}, nil // 0-config mode
+		}
+		return nil, fmt.Errorf("reading accounts file %s: %w", path, err)
 	}
 	return parse(data)
 }
@@ -121,14 +126,16 @@ func (a *Account) Normalize() {
 	if a.DraftsMailbox == "" {
 		a.DraftsMailbox = "Drafts"
 	}
-	if a.IMAP.Port == 0 {
+	// Port/TLS defaults are only applied when a host is set (i.e. not left
+	// for DNS auto-discovery); see SetIMAP/SetSMTP.
+	if a.IMAP.Host != "" && a.IMAP.Port == 0 {
 		if a.IMAP.TLS {
 			a.IMAP.Port = 993
 		} else {
 			a.IMAP.Port = 143
 		}
 	}
-	if a.SMTP.Port == 0 {
+	if a.SMTP.Host != "" && a.SMTP.Port == 0 {
 		if a.SMTP.TLS {
 			a.SMTP.Port = 465
 		} else {
@@ -137,13 +144,56 @@ func (a *Account) Normalize() {
 	}
 }
 
+// SetIMAP sets the IMAP endpoint and derives the port/TLS mode when not given.
+func (a *Account) SetIMAP(host string, port int, tlsMode string) {
+	a.IMAP.Host = host
+	switch tlsMode {
+	case "tls":
+		a.IMAP.TLS, a.IMAP.Insecure = true, false
+		if port == 0 {
+			port = 993
+		}
+	case "starttls":
+		a.IMAP.TLS, a.IMAP.Insecure = false, false
+		if port == 0 {
+			port = 143
+		}
+	case "insecure":
+		a.IMAP.TLS, a.IMAP.Insecure = false, true
+		if port == 0 {
+			port = 143
+		}
+	}
+	a.IMAP.Port = port
+}
+
+// SetSMTP sets the SMTP endpoint and derives the port/TLS mode when not given.
+func (a *Account) SetSMTP(host string, port int, tlsMode string) {
+	a.SMTP.Host = host
+	switch tlsMode {
+	case "tls":
+		a.SMTP.TLS, a.SMTP.Insecure = true, false
+		if port == 0 {
+			port = 465
+		}
+	case "starttls":
+		a.SMTP.TLS, a.SMTP.Insecure = false, false
+		if port == 0 {
+			port = 587
+		}
+	case "insecure":
+		a.SMTP.TLS, a.SMTP.Insecure = false, true
+		if port == 0 {
+			port = 25
+		}
+	}
+	a.SMTP.Port = port
+}
+
 func parse(data []byte) (*Accounts, error) {
 	var accs Accounts
 	if err := json.Unmarshal(data, &accs); err != nil {
 		return nil, fmt.Errorf("parsing accounts JSON: %w", err)
-	}
-	if len(accs.Accounts) == 0 {
-		return nil, fmt.Errorf("no accounts configured")
 	}
 	seen := map[string]bool{}
 	for i := range accs.Accounts {
@@ -159,6 +209,91 @@ func parse(data []byte) (*Accounts, error) {
 		seen[d] = true
 	}
 	return &accs, nil
+}
+
+// FromQuery builds an account from URL query parameters. Supported params:
+//
+//	email              (required) user's mail address, e.g. user@gmail.com
+//	display_name       display name for the From header
+//	username           login username (default: email)
+//	imap_host, imap_port, imap_tls / imap_starttls / imap_insecure
+//	smtp_host, smtp_port, smtp_tls / smtp_starttls / smtp_insecure
+//	auth_mechanism     plain (default) | login | xoauth2
+//	sent_mailbox, drafts_mailbox
+//
+// The password is never taken from the query string; it is obtained from the
+// user via elicitation or from the account config/env.
+func FromQuery(q map[string][]string) (*Account, error) {
+	get := func(key string) string {
+		if v := q[key]; len(v) > 0 {
+			return v[0]
+		}
+		return ""
+	}
+	getBool := func(keys ...string) (bool, bool) {
+		for _, k := range keys {
+			if v := get(k); v != "" {
+				return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes"), true
+			}
+		}
+		return false, false
+	}
+	getInt := func(key string) (int, error) {
+		s := get(key)
+		if s == "" {
+			return 0, nil
+		}
+		var n int
+		if _, err := fmt.Sscanf(s, "%d", &n); err != nil || n <= 0 || n > 65535 {
+			return 0, fmt.Errorf("invalid %s=%q", key, s)
+		}
+		return n, nil
+	}
+
+	email := get("email")
+	if email == "" {
+		return nil, fmt.Errorf("missing required query param 'email' (e.g. ?email=user@gmail.com)")
+	}
+	if _, dom, ok := strings.Cut(email, "@"); !ok || dom == "" {
+		return nil, fmt.Errorf("invalid email %q", email)
+	}
+
+	acc := &Account{
+		Email:         email,
+		DisplayName:   get("display_name"),
+		Username:      get("username"),
+		AuthMechanism: get("auth_mechanism"),
+		SentMailbox:   get("sent_mailbox"),
+		DraftsMailbox: get("drafts_mailbox"),
+	}
+	imapPort, err := getInt("imap_port")
+	if err != nil {
+		return nil, err
+	}
+	smtpPort, err := getInt("smtp_port")
+	if err != nil {
+		return nil, err
+	}
+	tlsMode := func(prefix string) string {
+		if v, ok := getBool(prefix + "_insecure"); ok && v {
+			return "insecure"
+		}
+		if v, ok := getBool(prefix + "_tls"); ok {
+			if v {
+				return "tls"
+			}
+			return "starttls"
+		}
+		if v, ok := getBool(prefix + "_starttls"); ok && v {
+			return "starttls"
+		}
+		return ""
+	}
+	acc.SetIMAP(get("imap_host"), imapPort, tlsMode("imap"))
+	acc.SetSMTP(get("smtp_host"), smtpPort, tlsMode("smtp"))
+
+	acc.Normalize()
+	return acc, nil
 }
 
 // ByDomain indexes accounts by email domain.

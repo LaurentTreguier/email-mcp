@@ -2,6 +2,7 @@
 package mcpserver
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,7 +25,30 @@ func New(acc *config.Account) *mcp.Server {
 	registerTools(s, sess)
 	registerResources(s, sess)
 	registerPrompts(s, sess)
+	// Ask the user for credentials (elicitation) on the first tool call that
+	// needs a login, if no password is configured.
+	s.AddReceivingMiddleware(credentialMiddleware(sess))
 	return s
+}
+
+// credentialMiddleware intercepts tools/call: if the account has no
+// password yet, elicit one from the user before running the tool.
+func credentialMiddleware(sess *mail.Session) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/call" {
+				if ctReq, ok := req.(*mcp.CallToolRequest); ok {
+					if _, err := ensureCredentials(ctx, ctReq, sess); err != nil {
+						return &mcp.CallToolResult{
+							IsError: true,
+							Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+						}, nil
+					}
+				}
+			}
+			return next(ctx, method, req)
+		}
+	}
 }
 
 // Session returns the mail session backing a server (for lifecycle management).

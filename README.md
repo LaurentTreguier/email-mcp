@@ -1,15 +1,57 @@
 # email-mcp
 
-A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP**.
+A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP** — in **0-config mode** by default.
 
-One process serves many accounts. Each account is reachable at a path named after the **plain domain** of its email address:
+## Zero-config usage (default)
+
+No config file needed. Point the client at the domain of the mail account and pass the email address as a query param:
 
 ```
-https://mcp.example.org/gmail.com      -> user@gmail.com
-https://mcp.example.org/example.org    -> someone@example.org
+https://mcp.example.org/gmail.com?email=user@gmail.com
 ```
 
-`GET /` returns a JSON discovery document listing the available account paths.
+- **Server settings are auto-discovered** from DNS: `_imaps._tcp` / `_imap._tcp` and `_submissions._tcp` / `_submission._tcp` SRV records (RFC 6186), falling back to the MX host (RFC 7505) and then `imap.<domain>` / `smtp.<domain>` on the well-known ports.
+- **Credentials are requested from the user** via MCP elicitation (the client pops a form asking for the password / app-password / OAuth token) — secrets are never put in URLs or config.
+- Optional query-param overrides:
+
+| Param | Meaning |
+|---|---|
+| `email` | (required) user's mail address |
+| `username` | login name (default: email) |
+| `display_name` | From-header display name |
+| `imap_host`, `imap_port`, `imap_tls=1`, `imap_starttls=1`, `imap_insecure=1` | IMAP endpoint override |
+| `smtp_host`, `smtp_port`, `smtp_tls=1`, `smtp_starttls=1`, `smtp_insecure=1` | SMTP endpoint override |
+| `auth_mechanism` | `plain` (default), `login`, `xoauth2` |
+| `sent_mailbox`, `drafts_mailbox` | folder names (default `Sent` / `Drafts`) |
+
+Example with explicit servers:
+
+```
+https://mcp.example.org/example.org?email=user@example.org&imap_host=mail.example.org&imap_port=993&imap_tls=1&smtp_host=smtp.example.org&smtp_port=465&smtp_tls=1
+```
+
+`GET /` returns a JSON discovery document describing the configured accounts and the zero-config convention.
+
+## Optional pre-configured accounts
+
+Accounts can still be pinned via `EMAIL_MCP_ACCOUNTS` (inline JSON or a file path) or `~/.config/email-mcp/accounts.json`; those are served at `/{domain}` with no query params, and `password_env` indirection keeps secrets out of the file:
+
+```json
+{
+  "accounts": [
+    {
+      "email": "user@gmail.com",
+      "display_name": "User Name",
+      "password_env": "GMAIL_APP_PASSWORD",
+      "auth_mechanism": "plain",
+      "imap": { "host": "imap.gmail.com", "port": 993, "tls": true },
+      "smtp": { "host": "smtp.gmail.com", "port": 587 }
+    }
+  ]
+}
+```
+
+Query params on a pre-configured domain are merged on top of the static entry.
 
 ## Features
 
@@ -37,8 +79,9 @@ https://mcp.example.org/example.org    -> someone@example.org
 
 ## Configuration
 
-Accounts come from `EMAIL_MCP_ACCOUNTS` (inline JSON or a path to a JSON file)
-or `~/.config/email-mcp/accounts.json`:
+**By default the server is 0-config** (see above): any `/{domain}?email=...` works, with DNS auto-discovery and elicitation-based credentials.
+
+Optionally, pin accounts via `EMAIL_MCP_ACCOUNTS` (inline JSON or a path to a JSON file) or `~/.config/email-mcp/accounts.json`:
 
 ```json
 {
@@ -58,7 +101,7 @@ or `~/.config/email-mcp/accounts.json`:
 }
 ```
 
-- `password_env` names an env var holding the password / app-password / OAuth2 token — the secret itself never appears in the config file.
+- `password_env` names an env var holding the password / app-password / OAuth2 token — the secret itself never appears in the config file. If no password is configured at all, the server asks the user via MCP elicitation.
 - `auth_mechanism`: `plain` (default), `login`, or `xoauth2`.
 - IMAP/SMTP: `tls: true` = implicit TLS (993/465); otherwise STARTTLS (143/587). `insecure: true` skips TLS entirely (local testing only).
 - Optional `EMAIL_MCP_AUTH_TOKEN`: if set, all HTTP requests must carry `Authorization: Bearer <token>`.
@@ -67,12 +110,13 @@ or `~/.config/email-mcp/accounts.json`:
 
 ```sh
 go build -o email-mcp ./cmd/email-mcp
-EMAIL_MCP_ACCOUNTS='{...}' ./email-mcp -addr :8080
+./email-mcp -addr :8080
+# 0-config: https://mcp.example.org/gmail.com?email=user@gmail.com
 # behind a reverse proxy that terminates TLS:
-# https://mcp.example.org/gmail.com  ->  http://127.0.0.1:8080/gmail.com
+# https://mcp.example.org  ->  http://127.0.0.1:8080
 ```
 
-Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`), `-config` / `EMAIL_MCP_CONFIG`.
+Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`), `-config` / `EMAIL_MCP_CONFIG` (optional; without it the server runs 0-config).
 
 ## Client config (VS Code Copilot)
 
@@ -81,7 +125,7 @@ Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`), `-config` / `EMAIL_MCP_
   "mcpServers": {
     "gmail": {
       "type": "http",
-      "url": "https://mcp.example.org/gmail.com"
+      "url": "https://mcp.example.org/gmail.com?email=user@gmail.com"
     }
   }
 }

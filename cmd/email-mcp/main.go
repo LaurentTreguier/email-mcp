@@ -1,8 +1,15 @@
 // Command email-mcp serves mail accounts over MCP Streamable HTTP.
 //
-// Each configured account is exposed at https://<host>/<domain>, where <domain>
-// is the domain of the account's email address, e.g. https://mcp.example.org/gmail.com
-// for user@gmail.com.
+// Zero-config mode (default): any domain path is accepted, e.g.
+//
+//	https://mcp.example.org/gmail.com?email=user@gmail.com
+//
+// IMAP/SMTP endpoints are auto-discovered via DNS SRV/MX records (or given
+// explicitly as query params: imap_host, imap_port, imap_tls, smtp_host, ...),
+// and the password is requested from the user via MCP elicitation.
+//
+// Optionally, pre-configured accounts can be provided via EMAIL_MCP_ACCOUNTS
+// or a config file; those are served at /{domain} without query params.
 package main
 
 import (
@@ -21,7 +28,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", envOr("EMAIL_MCP_ADDR", ":8080"), "listen address for the Streamable HTTP server")
-	configPath := flag.String("config", envOr("EMAIL_MCP_CONFIG", ""), "path to accounts JSON file (default ~/.config/email-mcp/accounts.json; EMAIL_MCP_ACCOUNTS env var takes precedence)")
+	configPath := flag.String("config", envOr("EMAIL_MCP_CONFIG", ""), "optional path to accounts JSON file (EMAIL_MCP_ACCOUNTS env var takes precedence); without it the server runs in 0-config mode")
 	flag.Parse()
 
 	accs, err := config.Load(*configPath)
@@ -30,9 +37,14 @@ func main() {
 	}
 	byDomain := accs.ByDomain()
 
-	log.Printf("email-mcp: serving %d account(s):", len(byDomain))
-	for domain, acc := range byDomain {
-		log.Printf("  /%s  ->  %s", domain, acc.Email)
+	if len(byDomain) == 0 {
+		log.Printf("email-mcp: 0-config mode — any /{domain}?email=user@domain is accepted;")
+		log.Printf("             server settings via DNS auto-discovery or query params, credentials via elicitation")
+	} else {
+		log.Printf("email-mcp: serving %d pre-configured account(s):", len(byDomain))
+		for domain, acc := range byDomain {
+			log.Printf("  /%s  ->  %s", domain, acc.Email)
+		}
 	}
 
 	srv := &http.Server{

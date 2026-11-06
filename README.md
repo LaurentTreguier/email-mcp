@@ -55,7 +55,7 @@ https://mcp.example.org/example.org?username=user&imap_host=mail.example.org&ima
 - `save_draft`: APPEND to Drafts with `\Draft`
 
 **MCP surface**
-- 15 tools (see `tools/list`), resources (`mail://mailboxes`, templates
+- 19 tools (see `tools/list`), resources (`mail://mailboxes`, templates
   `mail://mailbox/{mailbox}`, `mail://message/{mailbox}/{uid}`,
   `mail://attachment/{mailbox}/{uid}/{part}`), and prompts
   (`triage_inbox`, `summarize_thread`, `draft_reply`, `find_unanswered`)

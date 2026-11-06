@@ -72,13 +72,3 @@ func mechanismLabel(m string) string {
 		return "PLAIN"
 	}
 }
-
-// withCredentials is kept for handlers that need the password value directly.
-func withCredentials(sess *mail.Session, fn func(ctx context.Context, req *mcp.CallToolRequest) error) func(ctx context.Context, req *mcp.CallToolRequest) error {
-	return func(ctx context.Context, req *mcp.CallToolRequest) error {
-		if _, err := ensureCredentials(ctx, req, sess); err != nil {
-			return err
-		}
-		return fn(ctx, req)
-	}
-}

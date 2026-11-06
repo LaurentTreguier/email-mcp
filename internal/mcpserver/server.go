@@ -21,12 +21,11 @@ func New(acc *config.Account) *mcp.Server {
 		Instructions: fmt.Sprintf("Mail account %s. Use the tools to list mailboxes, search and read messages, manage flags and folders, and send email.", acc.Email),
 		Capabilities: &mcp.ServerCapabilities{},
 	})
-	track(s, sess)
 	registerTools(s, sess)
 	registerResources(s, sess)
 	registerPrompts(s, sess)
 	// Ask the user for credentials (elicitation) on the first tool call that
-	// needs a login, if no password is configured.
+	// needs a login, if no password came in a credential header.
 	s.AddReceivingMiddleware(credentialMiddleware(sess))
 	return s
 }
@@ -50,10 +49,3 @@ func credentialMiddleware(sess *mail.Session) mcp.Middleware {
 		}
 	}
 }
-
-// Session returns the mail session backing a server (for lifecycle management).
-func SessionOf(s *mcp.Server) *mail.Session { return sessions[s] }
-
-var sessions = map[*mcp.Server]*mail.Session{}
-
-func track(s *mcp.Server, sess *mail.Session) { sessions[s] = sess }

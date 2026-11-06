@@ -8,7 +8,6 @@ import (
 	"net"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/emersion/go-message/charset"
@@ -123,23 +122,3 @@ func (s *Session) Close() {
 
 // Account returns the underlying account configuration.
 func (s *Session) Account() *config.Account { return s.acc }
-
-// keepaliveInterval is how often idle connections are pinged with NOOP.
-const keepaliveInterval = 25 * time.Minute
-
-// KeepAlive starts a background NOOP loop to keep the connection alive.
-// The goroutine exits when stop is closed or the process ends.
-func (s *Session) KeepAlive(stop <-chan struct{}) {
-	t := time.NewTicker(keepaliveInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			s.withClient(func(c *imapclient.Client) error {
-				return c.Noop().Wait()
-			})
-		}
-	}
-}

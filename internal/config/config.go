@@ -11,24 +11,24 @@ import (
 
 // IMAPConfig describes how to reach an IMAP server.
 type IMAPConfig struct {
-	Host string `json:"host"` // e.g. "imap.gmail.com"
-	Port int    `json:"port"` // e.g. 993
-	TLS  bool   `json:"tls"`  // implicit TLS; if false, STARTTLS is attempted
+	Host string // e.g. "imap.gmail.com"
+	Port int    // e.g. 993
+	TLS  bool   // implicit TLS; if false, STARTTLS is attempted
 	// Insecure dials without any TLS. Only for local testing.
-	Insecure bool `json:"insecure,omitempty"`
+	Insecure bool
 	// InsecureSkipVerify disables certificate verification. Only for local testing.
-	InsecureSkipVerify bool `json:"insecure_skip_verify,omitempty"`
+	InsecureSkipVerify bool
 }
 
 // SMTPConfig describes how to reach an SMTP submission server.
 type SMTPConfig struct {
-	Host string `json:"host"` // e.g. "smtp.gmail.com"
-	Port int    `json:"port"` // e.g. 587
-	TLS  bool   `json:"tls"`  // implicit TLS (465); if false, STARTTLS is used
+	Host string // e.g. "smtp.gmail.com"
+	Port int    // e.g. 587
+	TLS  bool   // implicit TLS (465); if false, STARTTLS is used
 	// Insecure dials without any TLS. Only for local testing.
-	Insecure bool `json:"insecure,omitempty"`
+	Insecure bool
 	// InsecureSkipVerify disables certificate verification. Only for local testing.
-	InsecureSkipVerify bool `json:"insecure_skip_verify,omitempty"`
+	InsecureSkipVerify bool
 }
 
 // Account is a single mail account, built per request from the URL path,
@@ -150,8 +150,9 @@ func (a *Account) SetSMTP(host string, port int, tlsMode string) {
 //	sent_mailbox, drafts_mailbox
 //
 // The mail address is derived as username@domain; there is no separate email
-// param. The password is never taken from the query string; it is obtained
-// from the user via elicitation or from the account config/env.
+//
+//	param. The password is never taken from the query string; it comes from a
+//	credential header or via elicitation.
 func FromQuery(domain string, q map[string][]string) (*Account, error) {
 	get := func(key string) string {
 		if v := q[key]; len(v) > 0 {

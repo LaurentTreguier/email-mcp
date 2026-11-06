@@ -174,7 +174,7 @@ func registerTools(s *mcp.Server, sess *mail.Session) {
 		}
 		return nil, getAttachmentOutput{
 			PartID:        in.PartID,
-			ContentBase64: base64StdEncode(data),
+			ContentBase64: b64Encode(data),
 			Size:          len(data),
 		}, nil
 	})
@@ -339,8 +339,4 @@ func registerTools(s *mcp.Server, sess *mail.Session) {
 		}
 		return nil, quotaOutput{Quota: q}, nil
 	})
-}
-
-func base64StdEncode(b []byte) string {
-	return b64Encode(b)
 }

@@ -34,7 +34,7 @@ Example with explicit servers:
 https://mcp.example.org/example.org?email=user@example.org&imap_host=mail.example.org&imap_port=993&imap_tls=1&smtp_host=smtp.example.org&smtp_port=465&smtp_tls=1
 ```
 
-`GET /` returns a JSON discovery document describing the configured accounts and the zero-config convention.
+`GET /` returns a JSON discovery document describing the configured accounts and the zero-config convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address and the optional overrides, submit, and the page shows the ready-to-copy endpoint URL (e.g. `https://mcp.example.org/gmail.com?email=user@gmail.com`) — the password is *never* in the URL, it goes in a request header (see above).
 
 ## Optional pre-configured accounts
 
@@ -121,6 +121,18 @@ go build -o email-mcp ./cmd/email-mcp
 ```
 
 Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`), `-config` / `EMAIL_MCP_CONFIG` (optional; without it the server runs 0-config).
+
+### Docker
+
+```sh
+docker build -t email-mcp .
+docker run -p 8080:8080 email-mcp
+# 0-config: https://mcp.example.org/gmail.com?email=user@gmail.com
+# (put a TLS-terminating reverse proxy in front for HTTPS)
+# optional env: -e EMAIL_MCP_ACCOUNTS=... -e EMAIL_MCP_AUTH_TOKEN=...
+```
+
+The image is a multi-stage build (golang:1.27-alpine → distroless static, nonroot, `EXPOSE 8080`, entrypoint `/email-mcp`).
 
 ## Client config (VS Code Copilot)
 

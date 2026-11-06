@@ -15,7 +15,7 @@ import (
 func New(acc *config.Account) *mcp.Server {
 	sess := mail.NewSession(acc)
 	s := mcp.NewServer(&mcp.Implementation{
-		Name:    "email-mcp/" + acc.Domain(),
+		Name:    "email-mcp/" + acc.Email,
 		Version: "v0.1.0",
 	}, &mcp.ServerOptions{
 		Instructions: fmt.Sprintf("Mail account %s. Use the tools to list mailboxes, search and read messages, manage flags and folders, and send email.", acc.Email),

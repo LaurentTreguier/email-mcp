@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"email-mcp/internal/config"
 )
 
 func get(t *testing.T, h http.Handler, path, accept string) (int, string, http.Header) {
@@ -38,8 +40,10 @@ func TestRootFormForBrowser(t *testing.T) {
 		`name="email"`, `name="display_name"`, `name="username"`,
 		`name="auth_mechanism"`, `name="imap_host"`, `name="imap_port"`,
 		`name="imap_tls"`, `name="imap_starttls"`, `name="imap_insecure"`,
+		`name="imap_skip_verify"`,
 		`name="smtp_host"`, `name="smtp_port"`, `name="smtp_tls"`,
 		`name="smtp_starttls"`, `name="smtp_insecure"`,
+		`name="smtp_skip_verify"`,
 		`name="sent_mailbox"`, `name="drafts_mailbox"`,
 	} {
 		if !strings.Contains(body, field) {
@@ -49,38 +53,42 @@ func TestRootFormForBrowser(t *testing.T) {
 	if !strings.Contains(body, "<form") {
 		t.Error("form page has no <form> element")
 	}
+	// The form must explain the fixed endpoint and header convention.
+	if !strings.Contains(body, MCPEndpoint) || !strings.Contains(body, config.HeaderAddress) {
+		t.Error("form page should mention the fixed /mcp endpoint and X-Email-Address")
+	}
 }
 
 func TestRootResultPageWithQuery(t *testing.T) {
 	h := New()
-	code, body, _ := get(t, h, "/?email=user@Gmail.com&imap_host=mail.example.org&&smtp_port=&bogus=1", "text/html")
+	code, body, _ := get(t, h, "/?email=user@Gmail.com&imap_host=mail.example.org&smtp_port=&bogus=1", "text/html")
 	if code != 200 {
 		t.Fatalf("status = %d", code)
 	}
-	// The email field is split: domain becomes the path (lowercased),
-	// local part becomes the username param; empty/unknown params and the
-	// email param itself are stripped; params are sorted.
-	if !strings.Contains(body, "/gmail.com?") {
-		t.Errorf("result page missing cleaned /gmail.com path:\n%s", body)
+	// Fixed endpoint URL is shown.
+	if !strings.Contains(body, "/mcp") {
+		t.Errorf("result page missing the fixed /mcp endpoint:\n%s", body)
 	}
-	if !strings.Contains(body, "username=user") {
-		t.Errorf("result page missing username=user from split email:\n%s", body)
+	// Email becomes the X-Email-Address header; empty/unknown params are
+	// stripped; the password header is a placeholder, never a real password.
+	// (The <pre> block is HTML-escaped, so quotes appear as &#34;.)
+	if !strings.Contains(body, `&#34;X-Email-Address&#34;: &#34;user@Gmail.com&#34;`) {
+		t.Errorf("result page missing X-Email-Address header:\n%s", body)
 	}
-	if strings.Contains(body, "email=user") {
-		t.Errorf("result page must not contain an email= param:\n%s", body)
+	if !strings.Contains(body, `&#34;X-Email-IMAP-Host&#34;: &#34;mail.example.org&#34;`) {
+		t.Errorf("result page missing X-Email-IMAP-Host header:\n%s", body)
 	}
-	if !strings.Contains(body, "imap_host=mail.example.org") {
-		t.Errorf("result page missing imap_host param:\n%s", body)
+	if !strings.Contains(body, `&#34;X-Email-Password&#34;: &#34;${env:EMAIL_PASSWORD}&#34;`) {
+		t.Errorf("result page should contain the password placeholder:\n%s", body)
 	}
-	if strings.Contains(body, "smtp_port=") || strings.Contains(body, "bogus") {
+	if strings.Contains(body, "smtp_port") || strings.Contains(body, "bogus") {
 		t.Errorf("result page should strip empty/unknown params:\n%s", body)
 	}
-	if !strings.Contains(body, "X-Email-Password") {
-		t.Errorf("result page should remind about the credential header:\n%s", body)
+	if strings.Contains(body, "email=user") {
+		t.Errorf("result page must not put the raw email query in a URL:\n%s", body)
 	}
-	// Both full URL and short path are offered.
-	if !strings.Contains(body, "readonly") {
-		t.Errorf("result page should have a readonly copy field:\n%s", body)
+	if !strings.Contains(body, config.HeaderPassword) {
+		t.Errorf("result page should remind about the credential header:\n%s", body)
 	}
 }
 
@@ -91,8 +99,8 @@ func TestRootJSONDiscoveryUnchanged(t *testing.T) {
 	if code != 200 || !strings.Contains(hdr.Get("Content-Type"), "application/json") {
 		t.Fatalf("status=%d ct=%q", code, hdr.Get("Content-Type"))
 	}
-	if !strings.Contains(body, `"stateless":true`) || !strings.Contains(body, "username=user") {
-		t.Fatalf("discovery doc should describe stateless usage: %s", body)
+	if !strings.Contains(body, `"stateless":true`) || !strings.Contains(body, `"endpoint":"/mcp"`) {
+		t.Fatalf("discovery doc should describe stateless /mcp usage: %s", body)
 	}
 	// Explicit JSON accept also gets JSON.
 	_, body2, _ := get(t, h, "/", "application/json")
@@ -101,29 +109,43 @@ func TestRootJSONDiscoveryUnchanged(t *testing.T) {
 	}
 }
 
-func TestEndpointURL(t *testing.T) {
+func TestClientConfig(t *testing.T) {
 	q := map[string][]string{
-		"email":        {"User@Example.ORG"},
-		"smtp_tls":     {"1"},
-		"imap_host":    {"mail.example.org"},
-		"display_name": {""},
-		"evil":         {"<script>"},
+		"email":         {"User@Example.ORG"},
+		"smtp_tls":      {"1"},
+		"imap_host":     {"mail.example.org"},
+		"display_name":  {""},
+		"imap_starttls": {""}, // bare checkbox
+		"evil":          {"<script>"},
 	}
-	u := endpointURL("https://mcp.example.org", q)
-	want := "https://mcp.example.org/example.org?imap_host=mail.example.org&smtp_tls=1&username=User"
-	if u != want {
-		t.Errorf("endpointURL = %q, want %q", u, want)
+	cfg := clientConfig("https://mcp.example.org/mcp", q)
+	for _, want := range []string{
+		`"url": "https://mcp.example.org/mcp"`,
+		`"X-Email-Address": "User@Example.ORG"`,
+		`"X-Email-IMAP-Host": "mail.example.org"`,
+		`"X-Email-SMTP-TLS": "true"`,
+		`"X-Email-IMAP-STARTTLS": "true"`,
+		`"X-Email-Password": "${env:EMAIL_PASSWORD}"`,
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("clientConfig missing %s:\n%s", want, cfg)
+		}
+	}
+	if strings.Contains(cfg, "evil") || strings.Contains(cfg, "display_name") {
+		t.Errorf("clientConfig should strip unknown/empty params:\n%s", cfg)
 	}
 }
 
-func TestEndpointURLUsernameOverride(t *testing.T) {
+func TestClientConfigUsernameOverride(t *testing.T) {
 	q := map[string][]string{
 		"email":    {"user@example.org"},
 		"username": {"login-name"},
 	}
-	u := endpointURL("https://mcp.example.org", q)
-	want := "https://mcp.example.org/example.org?username=login-name"
-	if u != want {
-		t.Errorf("endpointURL = %q, want %q", u, want)
+	cfg := clientConfig("https://mcp.example.org/mcp", q)
+	if !strings.Contains(cfg, `"X-Email-Address": "user@example.org"`) {
+		t.Errorf("address header missing:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, `"X-Email-Username": "login-name"`) {
+		t.Errorf("username override header missing:\n%s", cfg)
 	}
 }

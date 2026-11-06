@@ -1,13 +1,13 @@
 // Command email-mcp serves mail accounts over MCP Streamable HTTP.
 //
-// The server is stateless: any domain path is accepted, e.g.
+// The server is stateless with a single fixed endpoint:
 //
-//	https://mcp.example.org/gmail.com?username=user
+//	https://mcp.example.org/mcp
 //
-// IMAP/SMTP endpoints are auto-discovered via DNS SRV/MX records (or given
-// explicitly as query params: imap_host, imap_port, imap_tls, smtp_host, ...),
-// and the credential is carried by the client request (X-Email-Password or
-// Authorization: Bearer header, else MCP elicitation).
+// The whole account setup travels in the client's X-Email-* request headers
+// (X-Email-Address required; X-Email-Password or an Authorization Bearer
+// token for the credential; optional IMAP/SMTP overrides, else DNS
+// auto-discovery).
 package main
 
 import (
@@ -27,8 +27,8 @@ func main() {
 	addr := flag.String("addr", envOr("EMAIL_MCP_ADDR", ":8080"), "listen address for the Streamable HTTP server")
 	flag.Parse()
 
-	log.Printf("email-mcp: stateless — any /{domain}?username=user is accepted (user@domain);")
-	log.Printf("             server settings via DNS auto-discovery or query params, credentials via header or elicitation")
+	log.Printf("email-mcp: stateless — single MCP endpoint at /mcp;")
+	log.Printf("             account via X-Email-* headers, server settings via DNS auto-discovery or headers, credentials via header or elicitation")
 
 	srv := &http.Server{
 		Addr:              *addr,

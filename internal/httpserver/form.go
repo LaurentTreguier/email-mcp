@@ -1,34 +1,46 @@
 package httpserver
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
+
+	"email-mcp/internal/config"
 )
 
-// formParams lists the URL query options the setup form exposes, in display
-// order. It mirrors the keys accepted by config.FromQuery.
-// The form's single "email" input is split into the path domain and the
-// "username" param when the endpoint URL is built (see endpointURL).
-var formParams = []string{
-	"email",
-	"username",
-	"display_name",
-	"auth_mechanism",
-	"imap_host",
-	"imap_port",
-	"imap_tls",
-	"imap_starttls",
-	"imap_insecure",
-	"smtp_host",
-	"smtp_port",
-	"smtp_tls",
-	"smtp_starttls",
-	"smtp_insecure",
-	"sent_mailbox",
-	"drafts_mailbox",
+// formField maps a setup-form input to the X-Email-* header it becomes in the
+// generated client config. Checkboxes emit "true" when checked.
+type formField struct {
+	name   string // form input name
+	header string // X-Email-* header (empty for the email field, handled separately)
+	bool   bool   // checkbox: checked → header: "true"
+}
+
+// formFields lists the form inputs in display order. The single "email" input
+// becomes the required X-Email-Address header.
+var formFields = []formField{
+	{name: "email"},
+	{name: "username", header: config.HeaderUsername},
+	{name: "display_name", header: config.HeaderDisplayName},
+	{name: "auth_mechanism", header: config.HeaderAuthMech},
+	{name: "imap_host", header: config.HeaderIMAPHost},
+	{name: "imap_port", header: config.HeaderIMAPPort},
+	{name: "imap_tls", header: config.HeaderIMAPTLS, bool: true},
+	{name: "imap_starttls", header: config.HeaderIMAPStartTLS, bool: true},
+	{name: "imap_insecure", header: config.HeaderIMAPInsecure, bool: true},
+	{name: "imap_skip_verify", header: config.HeaderIMAPSkipVerify, bool: true},
+	{name: "smtp_host", header: config.HeaderSMTPHost},
+	{name: "smtp_port", header: config.HeaderSMTPPort},
+	{name: "smtp_tls", header: config.HeaderSMTPTLS, bool: true},
+	{name: "smtp_starttls", header: config.HeaderSMTPStartTLS, bool: true},
+	{name: "smtp_insecure", header: config.HeaderSMTPInsecure, bool: true},
+	{name: "smtp_skip_verify", header: config.HeaderSMTPSkipVerify, bool: true},
+	{name: "sent_mailbox", header: config.HeaderSentMailbox},
+	{name: "drafts_mailbox", header: config.HeaderDraftsMailbox},
 }
 
 var formPage = template.Must(template.New("form").Parse(`<!DOCTYPE html>
@@ -36,29 +48,32 @@ var formPage = template.Must(template.New("form").Parse(`<!DOCTYPE html>
 <head><meta charset="utf-8"><title>email-mcp setup</title></head>
 <body>
 <h1>email-mcp &mdash; MCP endpoint for your mail account</h1>
-{{if .URL}}
-<p>Copy this MCP endpoint URL into your client config:</p>
-<p><input type="text" readonly size="100" value="{{.URL}}" onclick="this.select()"></p>
-<p>Or use this shorter path form:</p>
-<p><input type="text" readonly size="100" value="{{.ShortURL}}" onclick="this.select()"></p>
-<p>The password is <strong>never</strong> part of the URL. Send it in a
-request header instead: <code>X-Email-Password: &lt;password&gt;</code> or
-<code>Authorization: Bearer &lt;token&gt;</code>.
+{{if .Config}}
+<p>The MCP endpoint URL is fixed; your account travels in the request
+headers. Copy this into your client config (VS Code <code>mcp.json</code>,
+Mistral Vibe connection, ...):</p>
+<p><input type="text" readonly size="80" value="{{.Endpoint}}" onclick="this.select()"></p>
+<pre>{{.Config}}</pre>
+<p>The password is <strong>never</strong> part of the URL or this form. Set
+<code>{{.PasswordHeader}}</code> to the real password / app password (or use
+<code>Authorization: ******;token&gt;</code> with an OAuth2 access token);
+<code>${env:...}</code> references above are just placeholders.
 See <a href="/.well-known/oauth-protected-resource">/.well-known/oauth-protected-resource</a>
 for the machine-readable auth metadata.</p>
-<p><a href="/">&larr; build another endpoint</a></p>
+<p><a href="/">&larr; build another connection</a></p>
 {{else}}
-<p>Fill in your account to build the MCP endpoint URL. Server settings are
+<p>Fill in your account. The MCP endpoint URL stays fixed
+(<code>{{.Endpoint}}</code>); these settings become the
+<code>X-Email-*</code> headers of each request. Server settings are
 auto-discovered from DNS when left empty. The password is not entered here;
-you will pass it via a header when connecting.</p>
+you pass it via a header when connecting.</p>
 <form method="get" action="/">
 <fieldset>
 <legend>Account</legend>
 <p><label>email (required): <input type="text" name="email" placeholder="user@gmail.com" required></label>
-— split into the URL path (<code>/gmail.com</code>) and the
-<code>username</code> param (<code>?username=user</code>)</p>
+&rarr; <code>{{.AddressHeader}}</code></p>
+<p><label>username (login override, default: the email): <input type="text" name="username"></label></p>
 <p><label>display_name: <input type="text" name="display_name"></label></p>
-<p><label>username override (default: the email): <input type="text" name="username"></label></p>
 <p><label>auth_mechanism:
 <select name="auth_mechanism">
 <option value="">plain (default)</option>
@@ -72,7 +87,8 @@ you will pass it via a header when connecting.</p>
 <label>imap_port: <input type="text" name="imap_port" size="6" placeholder="993"></label></p>
 <p><label><input type="checkbox" name="imap_tls" value="1"> imap_tls (implicit TLS, 993)</label>
 <label><input type="checkbox" name="imap_starttls" value="1"> imap_starttls (143)</label>
-<label><input type="checkbox" name="imap_insecure" value="1"> imap_insecure (local testing only)</label></p>
+<label><input type="checkbox" name="imap_insecure" value="1"> imap_insecure (local testing only)</label>
+<label><input type="checkbox" name="imap_skip_verify" value="1"> imap_skip_verify (local testing only)</label></p>
 </fieldset>
 <fieldset>
 <legend>SMTP (leave empty for DNS auto-discovery)</legend>
@@ -80,14 +96,15 @@ you will pass it via a header when connecting.</p>
 <label>smtp_port: <input type="text" name="smtp_port" size="6" placeholder="465"></label></p>
 <p><label><input type="checkbox" name="smtp_tls" value="1"> smtp_tls (implicit TLS, 465)</label>
 <label><input type="checkbox" name="smtp_starttls" value="1"> smtp_starttls (587)</label>
-<label><input type="checkbox" name="smtp_insecure" value="1"> smtp_insecure (local testing only)</label></p>
+<label><input type="checkbox" name="smtp_insecure" value="1"> smtp_insecure (local testing only)</label>
+<label><input type="checkbox" name="smtp_skip_verify" value="1"> smtp_skip_verify (local testing only)</label></p>
 </fieldset>
 <fieldset>
 <legend>Folders</legend>
 <p><label>sent_mailbox: <input type="text" name="sent_mailbox" placeholder="Sent"></label>
 <label>drafts_mailbox: <input type="text" name="drafts_mailbox" placeholder="Drafts"></label></p>
 </fieldset>
-<p><button type="submit">Build endpoint URL</button></p>
+<p><button type="submit">Build client config</button></p>
 </form>
 {{end}}
 </body>
@@ -102,15 +119,15 @@ func wantsHTML(r *http.Request) bool {
 }
 
 // serveRoot handles GET /: an HTML setup form for browsers (GET / with query
-// params yields the ready-to-copy endpoint URL), and the JSON discovery
-// document for everything else.
+// params yields the ready-to-copy endpoint URL + client config), and the
+// JSON discovery document for everything else.
 func serveRoot(w http.ResponseWriter, r *http.Request) {
 	if wantsHTML(r) {
 		serveForm(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprint(w, `{"service":"email-mcp","stateless":true,"usage":"/{domain}?username=user — the mail address is username@domain. IMAP/SMTP settings are auto-discovered via DNS SRV/MX. Credentials: X-Email-Password header or Authorization: Bearer, else elicitation. Optional overrides: imap_host, imap_port, imap_tls, imap_starttls, smtp_host, smtp_port, smtp_tls, smtp_starttls, display_name, auth_mechanism, sent_mailbox, drafts_mailbox. Browsers: open / with an Accept: text/html header for a setup form"}`)
+	fmt.Fprint(w, `{"service":"email-mcp","stateless":true,"endpoint":"`+MCPEndpoint+`","usage":"POST `+MCPEndpoint+` with headers X-Email-Address: user@gmail.com (required) and X-Email-Password or Authorization: Bearer for the credential; optional X-Email-IMAP-*/X-Email-SMTP-* overrides, auto-discovered via DNS SRV/MX when unset. Other optional headers: X-Email-Username, X-Email-Display-Name, X-Email-Auth-Mechanism, X-Email-Sent-Mailbox, X-Email-Drafts-Mailbox. Browsers: open / with an Accept: text/html header for a setup form"}`)
 }
 
 // serveForm renders the setup form (no query) or the result page (query
@@ -118,14 +135,19 @@ func serveRoot(w http.ResponseWriter, r *http.Request) {
 func serveForm(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	base := scheme(r) + "://" + r.Host
+	endpoint := base + MCPEndpoint
 	data := struct {
-		URL      string
-		ShortURL string
-	}{}
+		Endpoint       string
+		Config         string
+		AddressHeader  string
+		PasswordHeader string
+	}{
+		Endpoint:       endpoint,
+		AddressHeader:  config.HeaderAddress,
+		PasswordHeader: config.HeaderPassword,
+	}
 	if hasAnyParam(q) {
-		u := endpointURL(base, q)
-		data.URL = u
-		data.ShortURL = strings.TrimPrefix(u, base)
+		data.Config = clientConfig(endpoint, q)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := formPage.Execute(w, data); err != nil {
@@ -137,50 +159,67 @@ func serveForm(w http.ResponseWriter, r *http.Request) {
 // hasAnyParam reports whether any known form param is present (including
 // bare checkbox names, which arrive with an empty value).
 func hasAnyParam(q url.Values) bool {
-	for _, k := range formParams {
-		if _, ok := q[k]; ok {
+	for _, f := range formFields {
+		if _, ok := q[f.name]; ok {
 			return true
 		}
 	}
 	return false
 }
 
-// endpointURL builds the cleaned MCP endpoint URL from the form query params:
-// scheme://host/{domain}?{non-empty known params, sorted}. The form's email
-// field is split into the path domain and the username param (an explicit
-// username field wins); the email param itself is never emitted. Unknown
-// params are dropped.
-func endpointURL(base string, q url.Values) string {
-	email := q.Get("email")
-	domain := ""
-	local := ""
-	if l, dom, ok := strings.Cut(email, "@"); ok {
-		local, domain = l, strings.ToLower(dom)
+// clientConfig builds the copy-pasteable client config for the fixed MCP
+// endpoint: the endpoint URL plus the X-Email-* headers derived from the form
+// query params (email → X-Email-Address; the password header is a placeholder
+// — passwords are never put in URLs or generated config).
+func clientConfig(endpoint string, q url.Values) string {
+	headers := map[string]string{}
+	if email := q.Get("email"); email != "" {
+		headers[config.HeaderAddress] = email
 	}
-	vals := url.Values{}
-	if q.Get("username") != "" {
-		vals.Set("username", q.Get("username"))
-	} else if local != "" {
-		vals.Set("username", local)
-	}
-	for _, k := range formParams {
-		if k == "email" {
-			continue // consumed above: becomes path + username
+	for _, f := range formFields {
+		if f.name == "email" || f.header == "" {
+			continue
 		}
-		if v := q.Get(k); v != "" {
-			vals.Set(k, v)
+		if _, present := q[f.name]; !present {
+			continue
 		}
-	}
-	// Checkbox params may arrive as bare names (?imap_tls) — normalize to =1.
-	for _, k := range []string{"imap_tls", "imap_starttls", "imap_insecure", "smtp_tls", "smtp_starttls", "smtp_insecure"} {
-		if _, present := q[k]; present && q.Get(k) == "" {
-			vals.Set(k, "1")
+		if f.bool {
+			if q.Get(f.name) != "" || presentBare(q, f.name) {
+				headers[f.header] = "true"
+			}
+			continue
+		}
+		if v := q.Get(f.name); v != "" {
+			headers[f.header] = v
 		}
 	}
-	enc := vals.Encode() // sorted, URL-escaped
-	u := base + "/" + domain
-	if enc != "" {
-		u += "?" + enc
+	// Placeholder for the credential: real value comes from the user's env.
+	headers[config.HeaderPassword] = "${env:EMAIL_PASSWORD}"
+
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
 	}
-	return u
+	sort.Strings(keys)
+	var sb strings.Builder
+	sb.WriteString("{\n  \"mcpServers\": {\n    \"mail\": {\n")
+	fmt.Fprintf(&sb, "      \"type\": \"http\",\n      \"url\": %q,\n      \"headers\": {\n", endpoint)
+	for i, k := range keys {
+		comma := ","
+		if i == len(keys)-1 {
+			comma = ""
+		}
+		kb, _ := json.Marshal(k)
+		vb, _ := json.Marshal(headers[k])
+		fmt.Fprintf(&sb, "        %s: %s%s\n", kb, vb, comma)
+	}
+	sb.WriteString("      }\n    }\n  }\n}")
+	return sb.String()
+}
+
+// presentBare reports whether the param arrived as a bare checkbox name
+// (?imap_tls with no =value).
+func presentBare(q url.Values, key string) bool {
+	vals, ok := q[key]
+	return ok && len(vals) > 0 && vals[0] == ""
 }

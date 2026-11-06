@@ -3,44 +3,48 @@
 ## What this is
 
 A Go **MCP server** that exposes any IMAP/SMTP mail account to LLM hosts over
-**MCP Streamable HTTP**. The server is **stateless**: there is no server-side
-account configuration (no config file, no `EMAIL_MCP_ACCOUNTS`). Every request
-fully describes the account:
+**MCP Streamable HTTP**. The server is **stateless** and has a **single fixed
+endpoint**:
 
 ```
-https://<host>/<domain>?username=user[&imap_host=...&smtp_host=...&...]
+POST https://<host>/mcp
 ```
 
-- The **URL path** is the plain mail domain: `/gmail.com` → domain `gmail.com`.
-- **Query params** carry identity + server overrides (below). The mail address is
-  derived as `username@domain` (`/gmail.com?username=user` is `user@gmail.com`;
-  a full address whose domain matches the path also works; the default login
-  name is the full address). Anything unset is auto-discovered via DNS
-  (SRV `_imaps/_imap/_submissions/_submission`, then MX, then
-  `imap.<domain>`/`smtp.<domain>`).
-- **Credential** comes in a request header, never in the URL:
-  `X-Email-Password: <password-or-app-password>` (custom header) or
-  `Authorization: Bearer <token>` (used as the mail credential, e.g. XOAUTH2).
-  `/.well-known/oauth-protected-resource` (RFC 9728) advertises this. Fallback:
-  MCP elicitation on the first `tools/call`.
+The whole account setup travels in the client's **`X-Email-*` request
+headers** — no per-account URL, no server-side configuration. This matches
+MCP clients with named connections (Mistral Vibe, VS Code `mcp.json`
+`"headers"`, Claude Desktop): each connection shares the same `url` and
+differs only by its headers.
+
+- **Required**: `X-Email-Address: user@gmail.com` (full mail address; its
+  domain drives DNS auto-discovery).
+- **Credential** (setup-time, never in the URL):
+  `X-Email-Password: <password-or-app-password>` (custom header), or
+  `Authorization: ****** (token used as the mail credential, e.g. XOAUTH2;
+  xoauth2 is the default mechanism when only a Bearer token is given).
+  `/.well-known/oauth-protected-resource` (RFC 9728) advertises this.
+  Fallback: MCP elicitation on the first `tools/call`.
+- **Optional overrides** (unset = DNS auto-discovery via SRV
+  `_imaps/_imap/_submissions/_submission`, then MX, then
+  `imap.<domain>`/`smtp.<domain>`): `X-Email-Username`,
+  `X-Email-Display-Name`, `X-Email-Auth-Mechanism` (`plain` default with
+  password header, `login`, `xoauth2`), `X-Email-Sent-Mailbox`,
+  `X-Email-Drafts-Mailbox`, and the IMAP/SMTP set `X-Email-IMAP-Host` /
+  `-Port` / `-TLS` / `-STARTTLS` / `-Insecure` / `-Skip-Verify` plus the
+  `X-Email-SMTP-*` twins (booleans accept `1`/`true`/`yes`).
 - `GET /` serves a JSON discovery doc; browsers (`Accept: text/html`) get a
-  plain HTML setup form that builds the copy-pasteable endpoint URL.
+  plain HTML setup form that emits the fixed endpoint URL + a copy-pasteable
+  client config with the `X-Email-*` headers (password stays a
+  `${env:...}` placeholder).
 - Optional deployment-level gate: `EMAIL_MCP_AUTH_TOKEN` env (then `Bearer`
   must match it and is NOT a mail credential). Only other flag/env:
   `-addr` / `EMAIL_MCP_ADDR` (default `:8080`).
-
-### Query params (all optional except `username`)
-
-`username` (required), `display_name`, `auth_mechanism` (`plain` default,
-`login`, `xoauth2`), `imap_host`, `imap_port`, `imap_tls=1`, `imap_starttls=1`,
-`imap_insecure=1` (local testing only), same set with `smtp_` prefix,
-`sent_mailbox`, `drafts_mailbox`.
 
 ## Layout
 
 ```
 cmd/email-mcp/main.go          entrypoint: flags, http.Server, graceful shutdown
-internal/config/config.go      per-request Account struct + FromQuery(domain, q)
+internal/config/config.go      per-request Account struct + FromHeaders(http.Header)
 internal/discovery/discovery.go DNS SRV/MX/well-known discovery + reachability
 internal/mail/                 IMAP session + ops, MIME parsing, SMTP compose/send
   session.go                   lazy dial (TLS/STARTTLS/insecure), SASL, reconnect-once
@@ -56,7 +60,7 @@ internal/mcpserver/            MCP wiring per account (built per request)
   credentials.go               ensureCredentials: header password, else elicitation
   b64.go                       b64Encode, boolPtr helpers
 internal/httpserver/           stateless HTTP routing: New() http.Handler
-  httpserver.go                 /{domain} → per-request MCP server; / discovery; auth gate
+  httpserver.go                 POST /mcp → per-request MCP server; / discovery; auth gate
   form.go                      HTML setup form + result page at /
   *_test.go, fakeimap_test.go  e2e tests over httptest + in-memory IMAP
 Dockerfile                     multi-stage: golang:1.27-alpine → distroless static-debian13:nonroot
@@ -100,13 +104,14 @@ go run ./cmd/email-mcp -addr :8080   # local run; try GET / with Accept: text/ht
 
 ## Conventions
 
-- **Stateless**: never add server-side account state; accounts are built per
-  request in `httpserver.buildAccount` from path + query + header.
+- **Stateless, header-driven**: never add server-side account state and never
+  put account data in the URL path/query — accounts are built per request in
+  `httpserver.buildAccount` from the `X-Email-*` headers (`config.FromHeaders`).
+  The only MCP endpoint is `POST /mcp`.
 - **Secrets**: never in URLs, logs, or cache keys. Credential headers only
   (`X-Email-Password`, `Authorization: Bearer`); elicitation fallback asks via
-  `writeOnly` schema field. `*_insecure`/`InsecureSkipVerify` are explicit
+  a `writeOnly` schema field. `*-Insecure`/`*-Skip-Verify` headers are explicit
   opt-ins for local testing only (carry `//nolint:gosec` with a reason).
-- Paths use the **plain domain** (`/gmail.com`), not reverse-domain.
 - Error paths: account-build failures must surface as HTTP 400 with a
   descriptive message (see the `wrapped` handler in httpserver.go).
 - Tests use in-memory fakes (`imapserver`, custom SMTP sink); DNS/dial hooks in

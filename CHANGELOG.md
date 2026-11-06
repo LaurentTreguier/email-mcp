@@ -3,6 +3,24 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
+## Unreleased
+
+### Changed
+
+- **Header-driven accounts**: the MCP endpoint is now a single fixed path,
+  `POST /mcp` — there is no more per-domain URL (`/{domain}?username=...`).
+  The whole account setup travels in the client's `X-Email-*` request
+  headers (`X-Email-Address` required, `X-Email-Password` or
+  `Authorization: Bearer` for the credential, optional `X-Email-IMAP-*` /
+  `X-Email-SMTP-*` / `X-Email-Auth-Mechanism` / `X-Email-Display-Name` /
+  `X-Email-Username` / `X-Email-Sent-Mailbox` / `X-Email-Drafts-Mailbox`
+  overrides, else DNS auto-discovery). This matches MCP clients with named
+  connections (Mistral Vibe, VS Code `mcp.json` "headers"): every connection
+  uses the same URL and differs only by its headers.
+- The browser setup form at `GET /` now emits the fixed endpoint URL plus a
+  copy-pasteable client config with the corresponding `X-Email-*` headers
+  (password remains an `${env:...}` placeholder, never in the URL).
+
 ## v0.1.0
 
 First minor release. A stateless Go MCP server exposing any IMAP/SMTP mail

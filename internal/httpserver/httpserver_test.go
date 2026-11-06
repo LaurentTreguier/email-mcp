@@ -10,10 +10,36 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"email-mcp/internal/config"
 )
 
 // startFakeIMAPListener is injected by fakeimap_test.go.
 var startFakeIMAP func(t *testing.T) (addr string, cleanup func())
+
+// fakeHeaders returns the X-Email-* headers pointing at the fake IMAP server.
+func fakeHeaders(port int) map[string]string {
+	return map[string]string{
+		config.HeaderAddress:      "user@example.com",
+		config.HeaderPassword:     "secret",
+		config.HeaderIMAPHost:     "127.0.0.1",
+		config.HeaderIMAPPort:     fmt.Sprint(port),
+		config.HeaderIMAPInsecure: "1",
+		config.HeaderSMTPHost:     "127.0.0.1",
+		config.HeaderSMTPPort:     "25",
+		config.HeaderSMTPInsecure: "1",
+	}
+}
+
+// headerTransport injects static headers into every request.
+type headerTransport map[string]string
+
+func (h headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	for k, v := range h {
+		req.Header.Set(k, v)
+	}
+	return http.DefaultTransport.RoundTrip(req)
+}
 
 func TestDiscoveryEndpoint(t *testing.T) {
 	h := New()
@@ -30,18 +56,21 @@ func TestDiscoveryEndpoint(t *testing.T) {
 	if !strings.Contains(s, `"service":"email-mcp"`) || !strings.Contains(s, `"stateless":true`) {
 		t.Fatalf("discovery doc unexpected: %s", s)
 	}
-	if !strings.Contains(s, "username=user") {
-		t.Fatalf("discovery doc should describe /{domain}?username=... usage: %s", s)
+	if !strings.Contains(s, `"endpoint":"/mcp"`) {
+		t.Fatalf("discovery doc should name the fixed /mcp endpoint: %s", s)
+	}
+	if !strings.Contains(s, config.HeaderAddress) {
+		t.Fatalf("discovery doc should describe the %s header usage: %s", config.HeaderAddress, s)
 	}
 }
 
-func TestMissingUsernameReturns400(t *testing.T) {
+func TestMissingAddressReturns400(t *testing.T) {
 	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	// POST an initialize request without the username param; expect a 400.
-	req, _ := http.NewRequest("POST", srv.URL+"/unknown.net", strings.NewReader(
+	// POST an initialize request without the X-Email-Address header; expect a 400.
+	req, _ := http.NewRequest("POST", srv.URL+MCPEndpoint, strings.NewReader(
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -51,11 +80,25 @@ func TestMissingUsernameReturns400(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 for missing username, got %d", resp.StatusCode)
+		t.Fatalf("expected 400 for missing address header, got %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "username") {
-		t.Fatalf("expected error to mention username: %s", body)
+	if !strings.Contains(string(body), config.HeaderAddress) {
+		t.Fatalf("expected error to mention %s: %s", config.HeaderAddress, body)
+	}
+}
+
+func TestUnknownPathIs404(t *testing.T) {
+	h := New()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/gmail.com?username=user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for old per-domain path, got %d", resp.StatusCode)
 	}
 }
 
@@ -67,16 +110,17 @@ func TestMCPSessionOverHTTP(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	// Stateless: everything via query params, no server-side config.
+	// Stateless: everything via X-Email-* headers, no server-side config.
 	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
 	ctx := context.Background()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	transport := &mcp.StreamableClientTransport{Endpoint: srv.URL + "/example.com?username=user&imap_host=127.0.0.1&imap_port=0&smtp_host=127.0.0.1&smtp_port=25&imap_insecure=1&smtp_insecure=1"}
-	transport.Endpoint = fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
-	transport.HTTPClient = &http.Client{Transport: headerRoundTripper{header: HeaderEmailPassword, value: "secret"}}
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   srv.URL + MCPEndpoint,
+		HTTPClient: &http.Client{Transport: headerTransport(fakeHeaders(port))},
+	}
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -140,7 +184,7 @@ func TestMCPSessionOverHTTP(t *testing.T) {
 	}
 }
 
-func TestMCPSessionViaQueryParamsWithElicitation(t *testing.T) {
+func TestMCPSessionWithElicitation(t *testing.T) {
 	if startFakeIMAP == nil {
 		t.Skip("no fake IMAP server wired")
 	}
@@ -163,8 +207,12 @@ func TestMCPSessionViaQueryParamsWithElicitation(t *testing.T) {
 			}, nil
 		},
 	})
-	endpoint := fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
-	transport := &mcp.StreamableClientTransport{Endpoint: endpoint}
+	headers := fakeHeaders(port)
+	delete(headers, config.HeaderPassword)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   srv.URL + MCPEndpoint,
+		HTTPClient: &http.Client{Transport: headerTransport(headers)},
+	}
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -189,7 +237,7 @@ func TestMCPSessionViaQueryParamsWithElicitation(t *testing.T) {
 	}
 }
 
-func TestMCPSessionViaHeaderCredentials(t *testing.T) {
+func TestMCPSessionViaPasswordHeader(t *testing.T) {
 	if startFakeIMAP == nil {
 		t.Skip("no fake IMAP server wired")
 	}
@@ -197,19 +245,16 @@ func TestMCPSessionViaHeaderCredentials(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	// Credential via custom header: no elicitation needed.
+	// Credential via the custom password header: no elicitation needed.
 	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
 	ctx := context.Background()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil) // no elicitation handler
-	endpoint := fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
 	transport := &mcp.StreamableClientTransport{
-		Endpoint: endpoint,
-		HTTPClient: &http.Client{
-			Transport: headerRoundTripper{header: HeaderEmailPassword, value: "secret"},
-		},
+		Endpoint:   srv.URL + MCPEndpoint,
+		HTTPClient: &http.Client{Transport: headerTransport(fakeHeaders(port))},
 	}
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
@@ -243,12 +288,16 @@ func TestBearerTokenUsedAsCredential(t *testing.T) {
 
 	ctx := context.Background()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	endpoint := fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
+	headers := fakeHeaders(port)
+	delete(headers, config.HeaderPassword)
+	// The fake IMAP server only supports LOGIN, so select the plain
+	// mechanism explicitly; a real OAuth2 access token would use xoauth2
+	// (the default when only a Bearer token is given).
+	headers["Authorization"] = "Bearer secret"
+	headers[config.HeaderAuthMech] = "plain"
 	transport := &mcp.StreamableClientTransport{
-		Endpoint: endpoint,
-		HTTPClient: &http.Client{
-			Transport: headerRoundTripper{header: "Authorization", value: "Bearer secret"},
-		},
+		Endpoint:   srv.URL + MCPEndpoint,
+		HTTPClient: &http.Client{Transport: headerTransport(headers)},
 	}
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
@@ -264,7 +313,7 @@ func TestBearerTokenUsedAsCredential(t *testing.T) {
 		t.Fatalf("call: %v", err)
 	}
 	if res.IsError {
-		t.Fatalf("expected success with Bearer credential, got error: %+v", res.Content)
+		t.Fatalf("expected success with bearer credential, got error: %+v", res.Content)
 	}
 }
 
@@ -284,12 +333,11 @@ func TestWrongHeaderCredentialFails(t *testing.T) {
 	// No elicitation handler: with a wrong header password the login must
 	// fail and the error must come from IMAP, not elicitation.
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	endpoint := fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
+	headers := fakeHeaders(port)
+	headers[config.HeaderPassword] = "wrong-password"
 	transport := &mcp.StreamableClientTransport{
-		Endpoint: endpoint,
-		HTTPClient: &http.Client{
-			Transport: headerRoundTripper{header: HeaderEmailPassword, value: "wrong-password"},
-		},
+		Endpoint:   srv.URL + MCPEndpoint,
+		HTTPClient: &http.Client{Transport: headerTransport(headers)},
 	}
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
@@ -329,19 +377,9 @@ func TestProtectedResourceMetadata(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 || !strings.Contains(string(body), `"custom_header":"X-Email-Password"`) {
+	if resp.StatusCode != 200 || !strings.Contains(string(body), `"custom_headers"`) || !strings.Contains(string(body), config.HeaderAddress) {
 		t.Fatalf("unexpected metadata: %d %s", resp.StatusCode, body)
 	}
-}
-
-// headerRoundTripper injects a static header into every request.
-type headerRoundTripper struct {
-	header, value string
-}
-
-func (h headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Header.Set(h.header, h.value)
-	return http.DefaultTransport.RoundTrip(req)
 }
 
 func splitAddr(addr string) (string, int) {

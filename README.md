@@ -1,42 +1,43 @@
 # email-mcp
 
-A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP**. The server is **stateless**: there is no server-side configuration at all — every request carries the full account description (path + query params + credential header).
+A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP**. The server is **stateless** and has a **single fixed endpoint** — the whole account setup travels in the client's request headers, which is how MCP clients with named connections (Mistral Vibe, VS Code `mcp.json`, Claude Desktop, ...) carry per-connection auth:
+
+```
+POST https://mcp.example.org/mcp
+X-Email-Address: user@gmail.com
+X-Email-Password: <app-password>        # or Authorization: ******<oauth2-token>
+```
 
 Current release: **v0.1.0** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Usage
 
-Point the client at the domain of the mail account (the URL path) and pass the user as a query param — the mail address is `username@domain`:
+The MCP endpoint URL is always the same; each named connection differs only by its headers:
 
 ```
-https://mcp.example.org/gmail.com?username=user        # user@gmail.com
-https://mcp.example.org/gmail.com?username=user@gmail.com   # full address also works
+https://mcp.example.org/mcp
 ```
 
-- **Server settings are auto-discovered** from DNS: `_imaps._tcp` / `_imap._tcp` and `_submissions._tcp` / `_submission._tcp` SRV records (RFC 6186), falling back to the MX host (RFC 7505) and then `imap.<domain>` / `smtp.<domain>` on the well-known ports.
-- **Credentials come from the request headers** (setup-time auth, no elicitation needed):
+- **`X-Email-Address`** (required): the full mail address, e.g. `user@gmail.com`. Its domain drives DNS auto-discovery.
+- **Credential** (setup-time auth, no elicitation needed):
   - `X-Email-Password: <password-or-app-password>` — custom header, works with any client that supports custom headers
-  - `Authorization: Bearer <token>` — OAuth-style bearer; the token is used directly as the mail credential (e.g. an XOAUTH2 access token)
+  - `Authorization: ****** — OAuth-style bearer; the token is used directly as the mail credential (XOAUTH2, the default mechanism when only a Bearer token is given)
   - `/.well-known/oauth-protected-resource` (RFC 9728) is served so OAuth-aware clients can discover the accepted methods
   - if neither header is present, the server falls back to asking the user via MCP elicitation on the first tool call
-- Optional query-param overrides:
+- **Server settings are auto-discovered** from the address domain via DNS: `_imaps._tcp` / `_imap._tcp` and `_submissions._tcp` / `_submission._tcp` SRV records (RFC 6186), falling back to the MX host (RFC 7505) and then `imap.<domain>` / `smtp.<domain>` on the well-known ports.
 
-| Param | Meaning |
+Optional header overrides (unset = auto-discovered via DNS):
+
+| Header | Meaning |
 |---|---|
-| `username` | (required) local part (e.g. `user`) or full address matching the path domain; the mail address — and default login name — is `username@domain` |
-| `display_name` | From-header display name |
-| `imap_host`, `imap_port`, `imap_tls=1`, `imap_starttls=1`, `imap_insecure=1` | IMAP endpoint override |
-| `smtp_host`, `smtp_port`, `smtp_tls=1`, `smtp_starttls=1`, `smtp_insecure=1` | SMTP endpoint override |
-| `auth_mechanism` | `plain` (default), `login`, `xoauth2` |
-| `sent_mailbox`, `drafts_mailbox` | folder names (default `Sent` / `Drafts`) |
+| `X-Email-Username` | login name override (default: the full address) |
+| `X-Email-Display-Name` | From-header display name |
+| `X-Email-Auth-Mechanism` | `plain` (default with password header), `login`, `xoauth2` (default with Bearer) |
+| `X-Email-IMAP-Host`, `X-Email-IMAP-Port`, `X-Email-IMAP-TLS: true`, `X-Email-IMAP-STARTTLS: true`, `X-Email-IMAP-Insecure: true`, `X-Email-IMAP-Skip-Verify: true` | IMAP endpoint override |
+| `X-Email-SMTP-Host`, `X-Email-SMTP-Port`, `X-Email-SMTP-TLS: true`, `X-Email-SMTP-STARTTLS: true`, `X-Email-SMTP-Insecure: true`, `X-Email-SMTP-Skip-Verify: true` | SMTP endpoint override |
+| `X-Email-Sent-Mailbox`, `X-Email-Drafts-Mailbox` | folder names (default `Sent` / `Drafts`) |
 
-Example with explicit servers:
-
-```
-https://mcp.example.org/example.org?username=user&imap_host=mail.example.org&imap_port=993&imap_tls=1&smtp_host=smtp.example.org&smtp_port=465&smtp_tls=1
-```
-
-`GET /` returns a JSON discovery document describing the stateless convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address and the optional overrides, submit, and the page shows the ready-to-copy endpoint URL (e.g. `https://mcp.example.org/gmail.com?username=user`) — the email is split into path + `username`, and the password is *never* in the URL, it goes in a request header (see above).
+`GET /` returns a JSON discovery document describing the convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address and the optional overrides, submit, and the page shows the fixed endpoint URL plus a ready-to-copy client config with the corresponding `X-Email-*` headers (the password is *never* in the URL or the generated config — it stays a `${env:...}` placeholder).
 
 ## Features
 
@@ -64,11 +65,7 @@ https://mcp.example.org/example.org?username=user&imap_host=mail.example.org&ima
 
 ## Configuration
 
-There is **no server-side account configuration** — the server is stateless. Per request, the account is built from:
-
-- the URL path domain (`/gmail.com`),
-- the query params (table above): `username` (required), `display_name`, `auth_mechanism`, `imap_*`/`smtp_*` overrides, `sent_mailbox`, `drafts_mailbox` — anything unset is auto-discovered via DNS,
-- the credential header (`X-Email-Password` or `Authorization: Bearer`), else MCP elicitation.
+There is **no server-side account configuration** — the server is stateless. Per request, the account is built from the `X-Email-*` request headers (table above); anything unset is auto-discovered via DNS, and the credential comes from `X-Email-Password` / `Authorization: Bearer` (else MCP elicitation).
 
 The only server-level settings are deployment knobs: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`) and the optional endpoint gate `EMAIL_MCP_AUTH_TOKEN` (if set, `Authorization: Bearer` must match this token and is then *not* used as a mail credential — use `X-Email-Password` for that).
 
@@ -77,7 +74,7 @@ The only server-level settings are deployment knobs: `-addr` / `EMAIL_MCP_ADDR` 
 ```sh
 go build -o email-mcp ./cmd/email-mcp
 ./email-mcp -addr :8080
-# stateless: https://mcp.example.org/gmail.com?username=user
+# stateless: POST https://mcp.example.org/mcp with X-Email-Address + credential headers
 # behind a reverse proxy that terminates TLS:
 # https://mcp.example.org  ->  http://127.0.0.1:8080
 ```
@@ -89,22 +86,23 @@ Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`); optional `EMAIL_MCP_AUT
 ```sh
 docker build -t email-mcp .
 docker run -p 8080:8080 email-mcp
-# stateless: https://mcp.example.org/gmail.com?username=user
+# stateless: POST https://mcp.example.org/mcp with X-Email-* headers
 # (put a TLS-terminating reverse proxy in front for HTTPS)
 # optional env: -e EMAIL_MCP_AUTH_TOKEN=...
 ```
 
 The image is a multi-stage build (golang:1.27-alpine → distroless static-debian13 nonroot, `EXPOSE 8080`, entrypoint `/email-mcp`).
 
-## Client config (VS Code Copilot)
+## Client config (VS Code Copilot / Mistral Vibe named connection)
 
 ```json
 {
   "mcpServers": {
     "gmail": {
       "type": "http",
-      "url": "https://mcp.example.org/gmail.com?username=user",
+      "url": "https://mcp.example.org/mcp",
       "headers": {
+        "X-Email-Address": "user@gmail.com",
         "X-Email-Password": "${env:GMAIL_APP_PASSWORD}"
       }
     }
@@ -112,7 +110,7 @@ The image is a multi-stage build (golang:1.27-alpine → distroless static-debia
 }
 ```
 
-(or `"Authorization": "Bearer ${env:OAUTH_TOKEN}"` with `auth_mechanism=xoauth2`)
+(or `"Authorization": "******"` with `"X-Email-Auth-Mechanism": "xoauth2"` for an OAuth2 access token). Multiple connections to different accounts are just multiple entries with the same `url` and different headers.
 
 ## Development
 
@@ -122,7 +120,7 @@ go test ./...   # unit tests against in-memory fake IMAP/SMTP servers + end-to-e
 
 ## Security notes
 
-- Credentials are carried only by client requests (header or elicitation); the server stores nothing and never logs them.
-- TLS by default; `*_insecure` / `insecure_skip_verify` query params are explicit opt-ins for local testing.
+- Credentials are carried only by client request headers (or elicitation); the server stores nothing and never logs them, and they never appear in URLs.
+- TLS by default; the `X-Email-*-Insecure` / `X-Email-*-Skip-Verify` headers are explicit opt-ins for local testing.
 - The HTTP endpoint can be gated with a deployment-level bearer token (`EMAIL_MCP_AUTH_TOKEN`).
 - Destructive tools are annotated (`delete_messages` has `destructiveHint`); keep a human in the loop in your client.

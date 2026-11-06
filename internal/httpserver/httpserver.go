@@ -161,19 +161,9 @@ func New(byDomain map[string]*config.Account) http.Handler {
 			}
 		}
 		if strings.Trim(r.URL.Path, "/") == "" {
-			w.Header().Set("Content-Type", "application/json")
-			domains := make([]string, 0, len(byDomain))
-			for domain := range byDomain {
-				domains = append(domains, domain)
-			}
-			fmt.Fprintf(w, `{"service":"email-mcp","configured_accounts":[`)
-			for i, d := range domains {
-				if i > 0 {
-					fmt.Fprint(w, ",")
-				}
-				fmt.Fprintf(w, `"/%s"`, d)
-			}
-			fmt.Fprint(w, `],"zero_config":"/{domain}?email=user@domain — IMAP/SMTP settings are auto-discovered via DNS SRV/MX. Credentials: X-Email-Password header or Authorization: Bearer <token>, else elicitation. Optional overrides: imap_host, imap_port, imap_tls, imap_starttls, smtp_host, smtp_port, smtp_tls, smtp_starttls, username, display_name, auth_mechanism, sent_mailbox, drafts_mailbox"}`)
+			// Browsers (Accept: text/html) get the HTML setup form at /;
+			// other clients keep the JSON discovery document.
+			serveRoot(w, r, byDomain)
 			return
 		}
 		wrapped.ServeHTTP(w, r)

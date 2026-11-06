@@ -11,13 +11,13 @@ import (
 )
 
 // ensureCredentials makes sure the session has a password. Resolution order:
-//  1. password already configured (config file / env / query-param account)
+//  1. password supplied by the client in a credential header (per request)
 //  2. elicitation: ask the connected user for it (never via URL)
 //
 // It returns the password to use, or an error.
 func ensureCredentials(ctx context.Context, req *mcp.CallToolRequest, sess *mail.Session) (string, error) {
 	acc := sess.Account()
-	if pw, err := acc.ResolvePassword(); err == nil && pw != "" {
+	if pw := acc.Password; pw != "" {
 		return pw, nil
 	}
 	if req == nil || req.Session == nil {
@@ -57,9 +57,8 @@ func ensureCredentials(ctx context.Context, req *mcp.CallToolRequest, sess *mail
 	if err := json.Unmarshal(raw, &form); err != nil || form.Password == "" {
 		return "", fmt.Errorf("no password provided")
 	}
-	// Cache on the account so we only ask once per process.
+	// Cache on the account so we only ask once per server instance.
 	acc.Password = form.Password
-	acc.PasswordEnv = ""
 	return form.Password, nil
 }
 

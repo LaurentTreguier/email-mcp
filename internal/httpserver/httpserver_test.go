@@ -3,33 +3,20 @@ package httpserver
 import (
 	"context"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"email-mcp/internal/config"
 )
 
-// startFakeIMAPListener is injected by the test to avoid an import cycle with
-// the mail package's test helpers; see TestMain-style wiring below.
+// startFakeIMAPListener is injected by fakeimap_test.go.
 var startFakeIMAP func(t *testing.T) (addr string, cleanup func())
 
-func TestMain(m *testing.M) {
-	// The fake IMAP server lives in internal/mail's test package; to avoid a
-	// dependency cycle we run a tiny inline IMAP greeting/login server here.
-	m.Run()
-}
-
 func TestDiscoveryEndpoint(t *testing.T) {
-	accs := &config.Accounts{Accounts: []config.Account{
-		{Email: "user@gmail.com", Password: "x", IMAP: config.IMAPConfig{Host: "127.0.0.1", Port: 1}, SMTP: config.SMTPConfig{Host: "127.0.0.1", Port: 1}},
-		{Email: "other@example.org", Password: "x", IMAP: config.IMAPConfig{Host: "127.0.0.1", Port: 1}, SMTP: config.SMTPConfig{Host: "127.0.0.1", Port: 1}},
-	}}
-	h := New(accs.ByDomain())
+	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -38,23 +25,22 @@ func TestDiscoveryEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	buf := make([]byte, 4096)
-	n, _ := resp.Body.Read(buf)
-	body := string(buf[:n])
-	if !strings.Contains(body, `"/gmail.com"`) || !strings.Contains(body, `"/example.org"`) {
-		t.Fatalf("discovery doc missing accounts: %s", body)
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, `"service":"email-mcp"`) || !strings.Contains(s, `"stateless":true`) {
+		t.Fatalf("discovery doc unexpected: %s", s)
+	}
+	if !strings.Contains(s, "username=user") {
+		t.Fatalf("discovery doc should describe /{domain}?username=... usage: %s", s)
 	}
 }
 
-func TestUnknownDomainReturnsError(t *testing.T) {
-	accs := &config.Accounts{Accounts: []config.Account{
-		{Email: "user@gmail.com", Password: "x", IMAP: config.IMAPConfig{Host: "127.0.0.1", Port: 1}, SMTP: config.SMTPConfig{Host: "127.0.0.1", Port: 1}},
-	}}
-	h := New(accs.ByDomain())
+func TestMissingUsernameReturns400(t *testing.T) {
+	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	// POST an initialize request to an unknown domain; expect a 4xx.
+	// POST an initialize request without the username param; expect a 400.
 	req, _ := http.NewRequest("POST", srv.URL+"/unknown.net", strings.NewReader(
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -64,8 +50,12 @@ func TestUnknownDomainReturnsError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 400 {
-		t.Fatalf("expected 4xx for unknown domain, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing username, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "username") {
+		t.Fatalf("expected error to mention username: %s", body)
 	}
 }
 
@@ -77,21 +67,16 @@ func TestMCPSessionOverHTTP(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	acc := &config.Account{
-		Email:    "user@example.com",
-		Username: "user@example.com",
-		Password: "secret",
-		IMAP:     config.IMAPConfig{Host: "127.0.0.1", Port: port, Insecure: true},
-		SMTP:     config.SMTPConfig{Host: "127.0.0.1", Port: 1, Insecure: true},
-	}
-	acc.Normalize()
-	h := New(map[string]*config.Account{"example.com": acc})
+	// Stateless: everything via query params, no server-side config.
+	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
 	ctx := context.Background()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	transport := &mcp.StreamableClientTransport{Endpoint: srv.URL + "/example.com"}
+	transport := &mcp.StreamableClientTransport{Endpoint: srv.URL + "/example.com?username=user&imap_host=127.0.0.1&imap_port=0&smtp_host=127.0.0.1&smtp_port=25&imap_insecure=1&smtp_insecure=1"}
+	transport.Endpoint = fmt.Sprintf("%s/example.com?username=user&imap_host=127.0.0.1&imap_port=%d&imap_insecure=1&smtp_host=127.0.0.1&smtp_port=25&smtp_insecure=1", srv.URL, port)
+	transport.HTTPClient = &http.Client{Transport: headerRoundTripper{header: HeaderEmailPassword, value: "secret"}}
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -155,7 +140,7 @@ func TestMCPSessionOverHTTP(t *testing.T) {
 	}
 }
 
-func TestMCPSessionViaQueryParams(t *testing.T) {
+func TestMCPSessionViaQueryParamsWithElicitation(t *testing.T) {
 	if startFakeIMAP == nil {
 		t.Skip("no fake IMAP server wired")
 	}
@@ -163,9 +148,9 @@ func TestMCPSessionViaQueryParams(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	// 0-config: no static accounts at all; everything via query params,
-	// pointing at the fake in-memory IMAP server.
-	h := New(map[string]*config.Account{})
+	// No credential header: the server must ask via elicitation on the
+	// first tool call, then talk to the fake IMAP server.
+	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -186,8 +171,6 @@ func TestMCPSessionViaQueryParams(t *testing.T) {
 	}
 	defer cs.Close()
 
-	// list_mailboxes should trigger elicitation (password "secret") and then
-	// talk to the fake IMAP server.
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "list_mailboxes",
 		Arguments: map[string]any{"pattern": "*"},
@@ -214,8 +197,8 @@ func TestMCPSessionViaHeaderCredentials(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	// 0-config + credential via custom header: no elicitation needed.
-	h := New(map[string]*config.Account{})
+	// Credential via custom header: no elicitation needed.
+	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -234,23 +217,15 @@ func TestMCPSessionViaHeaderCredentials(t *testing.T) {
 	}
 	defer cs.Close()
 
-	// Without the credential header this must fail (no elicitation support);
-	// with the header, list_mailboxes must succeed against the fake IMAP.
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "list_mailboxes",
-		Arguments: map[string]any{"pattern": "*"},
+		Arguments: map[string]any{},
 	})
 	if err != nil {
-		t.Fatalf("call list_mailboxes: %v", err)
+		t.Fatalf("call: %v", err)
 	}
 	if res.IsError {
-		var sb strings.Builder
-		for _, c := range res.Content {
-			if tc, ok := c.(*mcp.TextContent); ok {
-				sb.WriteString(tc.Text)
-			}
-		}
-		t.Fatalf("list_mailboxes error: %s", sb.String())
+		t.Fatalf("expected success with header credential, got error: %+v", res.Content)
 	}
 }
 
@@ -262,7 +237,7 @@ func TestBearerTokenUsedAsCredential(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	h := New(map[string]*config.Account{})
+	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -301,7 +276,7 @@ func TestWrongHeaderCredentialFails(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	h := New(map[string]*config.Account{})
+	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -344,7 +319,7 @@ func TestWrongHeaderCredentialFails(t *testing.T) {
 }
 
 func TestProtectedResourceMetadata(t *testing.T) {
-	h := New(map[string]*config.Account{})
+	h := New()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -353,10 +328,8 @@ func TestProtectedResourceMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	buf := make([]byte, 4096)
-	n, _ := resp.Body.Read(buf)
-	body := string(buf[:n])
-	if resp.StatusCode != 200 || !strings.Contains(body, `"custom_header":"X-Email-Password"`) {
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(body), `"custom_header":"X-Email-Password"`) {
 		t.Fatalf("unexpected metadata: %d %s", resp.StatusCode, body)
 	}
 }
@@ -377,5 +350,3 @@ func splitAddr(addr string) (string, int) {
 	fmt.Sscanf(portStr, "%d", &port)
 	return host, port
 }
-
-var _ = net.Listen

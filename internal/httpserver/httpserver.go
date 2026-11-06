@@ -1,26 +1,23 @@
 // Package httpserver exposes mail accounts over MCP Streamable HTTP.
 //
-// Accounts can come from three sources, merged together:
-//   - static config (env EMAIL_MCP_ACCOUNTS or accounts.json), served at
-//     /{domain}
-//   - per-request query params, e.g.
+// The server is stateless: no server-side account configuration exists.
+// Every request fully describes the account:
+//   - the URL path is the mail domain: /gmail.com
+//   - query params carry the identity and server overrides, e.g.
 //     /gmail.com?username=user&imap_host=imap.gmail.com&imap_port=993&imap_tls=1
 //     (the mail address is username@domain: /gmail.com?username=user is
-//     user@gmail.com)
-//     Server settings not given in the query are discovered automatically via
+//     user@gmail.com). Server settings not given are auto-discovered via
 //     DNS SRV/MX records.
-//   - per-request credentials via headers:
+//   - the credential comes in a request header:
 //     X-Email-Password: <password or app-password>   (custom header)
-//     Authorization: Bearer <token>                  (OAuth-style; the token is
-//     used as the mail credential, e.g. an XOAUTH2 access token)
+//     Authorization: Bearer <token>                  (the token is used
+//     as the mail credential, e.g. an XOAUTH2 access token)
 //
-// If no credential is provided this way, the server falls back to asking the
+// If no credential header is present, the server falls back to asking the
 // user via MCP elicitation on the first tool call.
 package httpserver
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -40,76 +37,40 @@ import (
 // mcp.json "headers", Claude Desktop, curl, ...).
 const HeaderEmailPassword = "X-Email-Password"
 
-// New returns an http.Handler routing /{domain} to the MCP Streamable HTTP
-// endpoint of the matching account. The root path returns a JSON discovery
-// document describing 0-config usage.
-func New(byDomain map[string]*config.Account) http.Handler {
+// New returns an http.Handler routing /{domain}?{params} to a stateless MCP
+// Streamable HTTP endpoint built per request. The root path serves a JSON
+// discovery document (or the HTML setup form for browsers).
+func New() http.Handler {
+	// buildErr carries the last account-build failure out of getServer so
+	// the wrapper can turn it into a useful 400 response. getServer may run
+	// on concurrent requests, so access is mutex-guarded.
 	var mu sync.Mutex
-	servers := map[string]*mcp.Server{}
-	stopCh := make(chan struct{})
-
-	// serverFor builds (or reuses) the MCP server for a domain + query params.
-	// On failure it records the error so getServer can report it in the response.
-	var lastErr error
-	serverFor := func(domain string, q map[string][]string, credential string) *mcp.Server {
-		// Cache key: domain + server overrides + a hash of the credential
-		// (the credential itself is never used as a key in cleartext).
-		key := domain + "|" + cacheKey(q) + "|" + hashCredential(credential)
+	var buildErr error
+	setErr := func(err error) {
+		mu.Lock()
+		buildErr = err
+		mu.Unlock()
+	}
+	getErr := func() error {
 		mu.Lock()
 		defer mu.Unlock()
-		if s, ok := servers[key]; ok {
-			return s
-		}
-
-		var acc *config.Account
-		if a, ok := byDomain[domain]; ok && len(q) == 0 && credential == "" {
-			acc = a // fully configured static account
-		} else {
-			var err error
-			acc, err = buildAccount(domain, q, byDomain[domain])
-			if err != nil {
-				lastErr = err
-				return nil
-			}
-			if credential != "" {
-				// Header-provided credential wins over config; it is used
-				// as-is for both IMAP and SMTP (XOAUTH2-style token or
-				// plain password).
-				acc.Password = credential
-				acc.PasswordEnv = ""
-				if acc.AuthMechanism == "" {
-					acc.AuthMechanism = "plain"
-				}
-			}
-		}
-
-		s := mcpserver.New(acc)
-		if sess := mcpserver.SessionOf(s); sess != nil {
-			go sess.KeepAlive(stopCh)
-		}
-		servers[key] = s
-		return s
+		return buildErr
 	}
 
-	// credentialFromRequest extracts the mail credential from the custom
-	// header or the Authorization: Bearer header.
-	credentialFromRequest := func(r *http.Request) string {
-		if v := r.Header.Get(HeaderEmailPassword); v != "" {
-			return v
-		}
-		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-			return strings.TrimPrefix(h, "Bearer ")
-		}
-		return ""
-	}
-
+	// getServer builds a fresh MCP server for each request from the path,
+	// query params and credential header — no state is kept between requests.
 	getServer := func(r *http.Request) *mcp.Server {
 		domain := strings.Trim(r.URL.Path, "/")
 		if domain == "" || strings.Contains(domain, "/") {
 			return nil
 		}
-		domain = strings.ToLower(domain)
-		return serverFor(domain, r.URL.Query(), credentialFromRequest(r))
+		acc, err := buildAccount(strings.ToLower(domain), r.URL.Query(), credentialFromRequest(r))
+		if err != nil {
+			setErr(err)
+			return nil
+		}
+		setErr(nil)
+		return mcpserver.New(acc)
 	}
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(getServer, &mcp.StreamableHTTPOptions{
@@ -118,18 +79,12 @@ func New(byDomain map[string]*config.Account) http.Handler {
 
 	// Wrap so that account-build failures surface as a useful 400 response
 	// instead of the SDK's generic "no server available".
-	var wrapped http.Handler
-	wrapped = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		domain := strings.Trim(r.URL.Path, "/")
 		if domain != "" && !strings.Contains(domain, "/") && r.Method == http.MethodPost {
-			mu.Lock()
-			lastErr = nil
-			mu.Unlock()
-			getServer(r) // trigger build to populate lastErr
-			mu.Lock()
-			err := lastErr
-			mu.Unlock()
-			if err != nil {
+			setErr(nil)
+			getServer(r) // trigger build to populate buildErr
+			if err := getErr(); err != nil {
 				http.Error(w, "cannot set up account: "+err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -137,6 +92,9 @@ func New(byDomain map[string]*config.Account) http.Handler {
 		mcpHandler.ServeHTTP(w, r)
 	})
 
+	// Optional deployment-level bearer gate protecting the whole endpoint
+	// (distinct from the per-request mail credential above: if set, the
+	// Authorization: Bearer value must match it and is NOT a mail credential).
 	authToken := os.Getenv("EMAIL_MCP_AUTH_TOKEN")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -149,10 +107,6 @@ func New(byDomain map[string]*config.Account) http.Handler {
 				resource, HeaderEmailPassword, HeaderEmailPassword)
 			return
 		}
-		// Optional server-level bearer token (protects the whole endpoint).
-		// Distinct from the per-account mail credential above: if
-		// EMAIL_MCP_AUTH_TOKEN is set, the Bearer header must match it and is
-		// NOT used as a mail credential.
 		if authToken != "" {
 			const prefix = "Bearer "
 			h := r.Header.Get("Authorization")
@@ -165,11 +119,23 @@ func New(byDomain map[string]*config.Account) http.Handler {
 		if strings.Trim(r.URL.Path, "/") == "" {
 			// Browsers (Accept: text/html) get the HTML setup form at /;
 			// other clients keep the JSON discovery document.
-			serveRoot(w, r, byDomain)
+			serveRoot(w, r)
 			return
 		}
 		wrapped.ServeHTTP(w, r)
 	})
+}
+
+// credentialFromRequest extracts the mail credential from the custom header
+// or the Authorization: Bearer token.
+func credentialFromRequest(r *http.Request) string {
+	if v := r.Header.Get(HeaderEmailPassword); v != "" {
+		return v
+	}
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimPrefix(h, "Bearer ")
+	}
+	return ""
 }
 
 func scheme(r *http.Request) string {
@@ -179,64 +145,17 @@ func scheme(r *http.Request) string {
 	return "http"
 }
 
-func hashCredential(s string) string {
-	if s == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:8])
-}
-
-// cacheKey builds a stable cache key from the server-related query params.
-func cacheKey(q map[string][]string) string {
-	keys := []string{"username", "imap_host", "imap_port", "imap_tls", "imap_starttls", "smtp_host", "smtp_port", "smtp_tls", "smtp_starttls", "auth_mechanism"}
-	var parts []string
-	for _, k := range keys {
-		if v := q[k]; len(v) > 0 {
-			parts = append(parts, k+"="+v[0])
-		}
-	}
-	return strings.Join(parts, "&")
-}
-
-// buildAccount merges: static config account for the domain (if any) as the
-// base, query params on top, and DNS auto-discovery for anything still unset.
-func buildAccount(domain string, q map[string][]string, base *config.Account) (*config.Account, error) {
+// buildAccount builds the account for one request: query params, then DNS
+// auto-discovery for any server setting still unset, then the header
+// credential.
+func buildAccount(domain string, q map[string][]string, credential string) (*config.Account, error) {
 	acc, err := config.FromQuery(domain, q)
 	if err != nil {
-		// No username param: maybe a static account exists for this domain.
-		if base != nil {
-			cpy := *base
-			return &cpy, nil
-		}
 		return nil, err
 	}
 
-	// Fill gaps from the static account.
-	if base != nil {
-		if acc.DisplayName == "" {
-			acc.DisplayName = base.DisplayName
-		}
-		if acc.AuthMechanism == "" {
-			acc.AuthMechanism = base.AuthMechanism
-		}
-		if acc.PasswordEnv == "" && base.PasswordEnv != "" {
-			acc.PasswordEnv = base.PasswordEnv
-		}
-		if acc.Password == "" && base.Password != "" {
-			acc.Password = base.Password
-		}
-		if acc.SentMailbox == "Sent" && base.SentMailbox != "Sent" {
-			acc.SentMailbox = base.SentMailbox
-		}
-		if acc.DraftsMailbox == "Drafts" && base.DraftsMailbox != "Drafts" {
-			acc.DraftsMailbox = base.DraftsMailbox
-		}
-	}
-
 	// Auto-discover any missing server settings via DNS.
-	needDiscovery := acc.IMAP.Host == "" || acc.SMTP.Host == ""
-	if needDiscovery {
+	if acc.IMAP.Host == "" || acc.SMTP.Host == "" {
 		discovered, derr := discovery.Discover(domain)
 		if derr != nil {
 			return nil, fmt.Errorf("auto-discovery for %s failed: %w (pass imap_host/imap_port/smtp_host/smtp_port explicitly)", domain, derr)
@@ -254,6 +173,15 @@ func buildAccount(domain string, q map[string][]string, base *config.Account) (*
 				mode = "starttls"
 			}
 			acc.SetSMTP(discovered.SMTPHost, discovered.SMTPPort, mode)
+		}
+	}
+
+	if credential != "" {
+		// The header credential is used as-is for both IMAP and SMTP
+		// (XOAUTH2-style token or plain password).
+		acc.Password = credential
+		if acc.AuthMechanism == "" {
+			acc.AuthMechanism = "plain"
 		}
 	}
 	return acc, nil

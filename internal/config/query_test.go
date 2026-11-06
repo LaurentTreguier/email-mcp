@@ -96,14 +96,3 @@ func TestFromQueryBadPort(t *testing.T) {
 		t.Fatal("expected error for non-numeric port")
 	}
 }
-
-func TestLoadMissingConfigIsZeroConfig(t *testing.T) {
-	t.Setenv(EnvVarName, "")
-	accs, err := Load(t.TempDir() + "/nonexistent.json")
-	if err != nil {
-		t.Fatalf("missing config should not be an error in 0-config mode: %v", err)
-	}
-	if len(accs.Accounts) != 0 {
-		t.Fatalf("expected empty accounts, got %d", len(accs.Accounts))
-	}
-}

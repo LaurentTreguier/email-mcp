@@ -1,15 +1,13 @@
 // Command email-mcp serves mail accounts over MCP Streamable HTTP.
 //
-// Zero-config mode (default): any domain path is accepted, e.g.
+// The server is stateless: any domain path is accepted, e.g.
 //
 //	https://mcp.example.org/gmail.com?username=user
 //
 // IMAP/SMTP endpoints are auto-discovered via DNS SRV/MX records (or given
 // explicitly as query params: imap_host, imap_port, imap_tls, smtp_host, ...),
-// and the password is requested from the user via MCP elicitation.
-//
-// Optionally, pre-configured accounts can be provided via EMAIL_MCP_ACCOUNTS
-// or a config file; those are served at /{domain} without query params.
+// and the credential is carried by the client request (X-Email-Password or
+// Authorization: Bearer header, else MCP elicitation).
 package main
 
 import (
@@ -22,34 +20,19 @@ import (
 	"syscall"
 	"time"
 
-	"email-mcp/internal/config"
 	"email-mcp/internal/httpserver"
 )
 
 func main() {
 	addr := flag.String("addr", envOr("EMAIL_MCP_ADDR", ":8080"), "listen address for the Streamable HTTP server")
-	configPath := flag.String("config", envOr("EMAIL_MCP_CONFIG", ""), "optional path to accounts JSON file (EMAIL_MCP_ACCOUNTS env var takes precedence); without it the server runs in 0-config mode")
 	flag.Parse()
 
-	accs, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatalf("loading config: %v", err)
-	}
-	byDomain := accs.ByDomain()
-
-	if len(byDomain) == 0 {
-		log.Printf("email-mcp: 0-config mode — any /{domain}?username=user is accepted (user@domain);")
-		log.Printf("             server settings via DNS auto-discovery or query params, credentials via elicitation")
-	} else {
-		log.Printf("email-mcp: serving %d pre-configured account(s):", len(byDomain))
-		for domain, acc := range byDomain {
-			log.Printf("  /%s  ->  %s", domain, acc.Email)
-		}
-	}
+	log.Printf("email-mcp: stateless — any /{domain}?username=user is accepted (user@domain);")
+	log.Printf("             server settings via DNS auto-discovery or query params, credentials via header or elicitation")
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           httpserver.New(byDomain),
+		Handler:           httpserver.New(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

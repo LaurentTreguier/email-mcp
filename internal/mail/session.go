@@ -57,11 +57,7 @@ func (s *Session) dial() (*imapclient.Client, error) {
 		return nil, fmt.Errorf("dialing IMAP %s: %w", addr, err)
 	}
 
-	password, err := s.acc.ResolvePassword()
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
+	password := s.acc.Password
 	switch s.acc.AuthMechanism {
 	case "", "plain":
 		if err := c.Login(s.acc.Username, password).Wait(); err != nil {

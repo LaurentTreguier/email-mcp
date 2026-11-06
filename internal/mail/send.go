@@ -176,12 +176,10 @@ func (s *Session) Send(raw []byte, from string, recipients []string, saveToSent 
 	addr := net.JoinHostPort(acc.SMTP.Host, strconv.Itoa(acc.SMTP.Port))
 	tlsCfg := &tls.Config{ServerName: acc.SMTP.Host, InsecureSkipVerify: acc.SMTP.InsecureSkipVerify} //nolint:gosec // opt-in for testing
 
-	password, err := acc.ResolvePassword()
-	if err != nil {
-		return err
-	}
+	password := acc.Password
 
 	var c *smtp.Client
+	var err error
 	switch {
 	case acc.SMTP.TLS:
 		c, err = smtp.DialTLS(addr, tlsCfg)

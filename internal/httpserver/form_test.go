@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"email-mcp/internal/config"
 )
 
 func get(t *testing.T, h http.Handler, path, accept string) (int, string, http.Header) {
@@ -28,7 +26,7 @@ func get(t *testing.T, h http.Handler, path, accept string) (int, string, http.H
 }
 
 func TestRootFormForBrowser(t *testing.T) {
-	h := New(map[string]*config.Account{})
+	h := New()
 	code, body, hdr := get(t, h, "/", "text/html,application/xhtml+xml")
 	if code != 200 {
 		t.Fatalf("status = %d", code)
@@ -54,7 +52,7 @@ func TestRootFormForBrowser(t *testing.T) {
 }
 
 func TestRootResultPageWithQuery(t *testing.T) {
-	h := New(map[string]*config.Account{})
+	h := New()
 	code, body, _ := get(t, h, "/?email=user@Gmail.com&imap_host=mail.example.org&&smtp_port=&bogus=1", "text/html")
 	if code != 200 {
 		t.Fatalf("status = %d", code)
@@ -87,21 +85,18 @@ func TestRootResultPageWithQuery(t *testing.T) {
 }
 
 func TestRootJSONDiscoveryUnchanged(t *testing.T) {
-	accs := &config.Accounts{Accounts: []config.Account{
-		{Email: "user@gmail.com", Password: "x", IMAP: config.IMAPConfig{Host: "127.0.0.1", Port: 1}, SMTP: config.SMTPConfig{Host: "127.0.0.1", Port: 1}},
-	}}
-	h := New(accs.ByDomain())
+	h := New()
 	// No Accept header (like http.Get): JSON discovery document.
 	code, body, hdr := get(t, h, "/", "")
 	if code != 200 || !strings.Contains(hdr.Get("Content-Type"), "application/json") {
 		t.Fatalf("status=%d ct=%q", code, hdr.Get("Content-Type"))
 	}
-	if !strings.Contains(body, `"/gmail.com"`) {
-		t.Fatalf("discovery doc missing accounts: %s", body)
+	if !strings.Contains(body, `"stateless":true`) || !strings.Contains(body, "username=user") {
+		t.Fatalf("discovery doc should describe stateless usage: %s", body)
 	}
 	// Explicit JSON accept also gets JSON.
 	_, body2, _ := get(t, h, "/", "application/json")
-	if !strings.Contains(body2, `"/gmail.com"`) {
+	if !strings.Contains(body2, `"service":"email-mcp"`) {
 		t.Fatalf("json accept should get discovery doc: %s", body2)
 	}
 }

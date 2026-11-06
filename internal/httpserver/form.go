@@ -5,14 +5,11 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
-
-	"email-mcp/internal/config"
 )
 
 // formParams lists the URL query options the setup form exposes, in display
-// order. It mirrors the keys accepted by config.FromQuery and the cache key.
+// order. It mirrors the keys accepted by config.FromQuery.
 // The form's single "email" input is split into the path domain and the
 // "username" param when the endpoint URL is built (see endpointURL).
 var formParams = []string{
@@ -107,25 +104,13 @@ func wantsHTML(r *http.Request) bool {
 // serveRoot handles GET /: an HTML setup form for browsers (GET / with query
 // params yields the ready-to-copy endpoint URL), and the JSON discovery
 // document for everything else.
-func serveRoot(w http.ResponseWriter, r *http.Request, byDomain map[string]*config.Account) {
+func serveRoot(w http.ResponseWriter, r *http.Request) {
 	if wantsHTML(r) {
 		serveForm(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	domains := make([]string, 0, len(byDomain))
-	for domain := range byDomain {
-		domains = append(domains, domain)
-	}
-	sort.Strings(domains)
-	fmt.Fprintf(w, `{"service":"email-mcp","configured_accounts":[`)
-	for i, d := range domains {
-		if i > 0 {
-			fmt.Fprint(w, ",")
-		}
-		fmt.Fprintf(w, `"/%s"`, d)
-	}
-	fmt.Fprint(w, `],"zero_config":"/{domain}?username=user — the mail address is username@domain. IMAP/SMTP settings are auto-discovered via DNS SRV/MX. Credentials: X-Email-Password header or Authorization: Bearer, else elicitation. Optional overrides: imap_host, imap_port, imap_tls, imap_starttls, smtp_host, smtp_port, smtp_tls, smtp_starttls, display_name, auth_mechanism, sent_mailbox, drafts_mailbox. Browsers: open / with an Accept: text/html header for a setup form"}`)
+	fmt.Fprint(w, `{"service":"email-mcp","stateless":true,"usage":"/{domain}?username=user — the mail address is username@domain. IMAP/SMTP settings are auto-discovered via DNS SRV/MX. Credentials: X-Email-Password header or Authorization: Bearer, else elicitation. Optional overrides: imap_host, imap_port, imap_tls, imap_starttls, smtp_host, smtp_port, smtp_tls, smtp_starttls, display_name, auth_mechanism, sent_mailbox, drafts_mailbox. Browsers: open / with an Accept: text/html header for a setup form"}`)
 }
 
 // serveForm renders the setup form (no query) or the result page (query

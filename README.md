@@ -1,10 +1,10 @@
 # email-mcp
 
-A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP** — in **0-config mode** by default.
+A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP**. The server is **stateless**: there is no server-side configuration at all — every request carries the full account description (path + query params + credential header).
 
-## Zero-config usage (default)
+## Usage
 
-No config file needed. Point the client at the domain of the mail account (the URL path) and pass the user as a query param — the mail address is `username@domain`:
+Point the client at the domain of the mail account (the URL path) and pass the user as a query param — the mail address is `username@domain`:
 
 ```
 https://mcp.example.org/gmail.com?username=user        # user@gmail.com
@@ -34,28 +34,7 @@ Example with explicit servers:
 https://mcp.example.org/example.org?username=user&imap_host=mail.example.org&imap_port=993&imap_tls=1&smtp_host=smtp.example.org&smtp_port=465&smtp_tls=1
 ```
 
-`GET /` returns a JSON discovery document describing the configured accounts and the zero-config convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address and the optional overrides, submit, and the page shows the ready-to-copy endpoint URL (e.g. `https://mcp.example.org/gmail.com?username=user`) — the email is split into path + `username`, and the password is *never* in the URL, it goes in a request header (see above).
-
-## Optional pre-configured accounts
-
-Accounts can still be pinned via `EMAIL_MCP_ACCOUNTS` (inline JSON or a file path) or `~/.config/email-mcp/accounts.json`; those are served at `/{domain}` with no query params, and `password_env` indirection keeps secrets out of the file:
-
-```json
-{
-  "accounts": [
-    {
-      "email": "user@gmail.com",
-      "display_name": "User Name",
-      "password_env": "GMAIL_APP_PASSWORD",
-      "auth_mechanism": "plain",
-      "imap": { "host": "imap.gmail.com", "port": 993, "tls": true },
-      "smtp": { "host": "smtp.gmail.com", "port": 587 }
-    }
-  ]
-}
-```
-
-Query params on a pre-configured domain are merged on top of the static entry.
+`GET /` returns a JSON discovery document describing the stateless convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address and the optional overrides, submit, and the page shows the ready-to-copy endpoint URL (e.g. `https://mcp.example.org/gmail.com?username=user`) — the email is split into path + `username`, and the password is *never* in the URL, it goes in a request header (see above).
 
 ## Features
 
@@ -83,53 +62,34 @@ Query params on a pre-configured domain are merged on top of the static entry.
 
 ## Configuration
 
-**By default the server is 0-config** (see above): any `/{domain}?username=...` works, with DNS auto-discovery and elicitation-based credentials.
+There is **no server-side account configuration** — the server is stateless. Per request, the account is built from:
 
-Optionally, pin accounts via `EMAIL_MCP_ACCOUNTS` (inline JSON or a path to a JSON file) or `~/.config/email-mcp/accounts.json`:
+- the URL path domain (`/gmail.com`),
+- the query params (table above): `username` (required), `display_name`, `auth_mechanism`, `imap_*`/`smtp_*` overrides, `sent_mailbox`, `drafts_mailbox` — anything unset is auto-discovered via DNS,
+- the credential header (`X-Email-Password` or `Authorization: Bearer`), else MCP elicitation.
 
-```json
-{
-  "accounts": [
-    {
-      "email": "user@gmail.com",
-      "display_name": "User Name",
-      "username": "user@gmail.com",
-      "password_env": "GMAIL_APP_PASSWORD",
-      "auth_mechanism": "plain",
-      "imap": { "host": "imap.gmail.com", "port": 993, "tls": true },
-      "smtp": { "host": "smtp.gmail.com", "port": 587 },
-      "sent_mailbox": "Sent",
-      "drafts_mailbox": "Drafts"
-    }
-  ]
-}
-```
-
-- `password_env` names an env var holding the password / app-password / OAuth2 token — the secret itself never appears in the config file. If no password is configured and no credential header is sent, the server asks the user via MCP elicitation.
-- `auth_mechanism`: `plain` (default), `login`, or `xoauth2`.
-- IMAP/SMTP: `tls: true` = implicit TLS (993/465); otherwise STARTTLS (143/587). `insecure: true` skips TLS entirely (local testing only).
-- Optional `EMAIL_MCP_AUTH_TOKEN`: if set, the `Authorization: Bearer` header must match this server-level token (it is then *not* used as a mail credential); use `X-Email-Password` for the mail credential in that case.
+The only server-level settings are deployment knobs: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`) and the optional endpoint gate `EMAIL_MCP_AUTH_TOKEN` (if set, `Authorization: Bearer` must match this token and is then *not* used as a mail credential — use `X-Email-Password` for that).
 
 ## Run
 
 ```sh
 go build -o email-mcp ./cmd/email-mcp
 ./email-mcp -addr :8080
-# 0-config: https://mcp.example.org/gmail.com?username=user
+# stateless: https://mcp.example.org/gmail.com?username=user
 # behind a reverse proxy that terminates TLS:
 # https://mcp.example.org  ->  http://127.0.0.1:8080
 ```
 
-Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`), `-config` / `EMAIL_MCP_CONFIG` (optional; without it the server runs 0-config).
+Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`); optional `EMAIL_MCP_AUTH_TOKEN` to gate the whole endpoint.
 
 ### Docker
 
 ```sh
 docker build -t email-mcp .
 docker run -p 8080:8080 email-mcp
-# 0-config: https://mcp.example.org/gmail.com?username=user
+# stateless: https://mcp.example.org/gmail.com?username=user
 # (put a TLS-terminating reverse proxy in front for HTTPS)
-# optional env: -e EMAIL_MCP_ACCOUNTS=... -e EMAIL_MCP_AUTH_TOKEN=...
+# optional env: -e EMAIL_MCP_AUTH_TOKEN=...
 ```
 
 The image is a multi-stage build (golang:1.27-alpine → distroless static-debian13 nonroot, `EXPOSE 8080`, entrypoint `/email-mcp`).
@@ -150,7 +110,7 @@ The image is a multi-stage build (golang:1.27-alpine → distroless static-debia
 }
 ```
 
-(or `"Authorization": "Bearer ${env:GMAIL_OAUTH_TOKEN"}` with `auth_mechanism=xoauth2`)
+(or `"Authorization": "Bearer ${env:OAUTH_TOKEN}"` with `auth_mechanism=xoauth2`)
 
 ## Development
 
@@ -160,7 +120,7 @@ go test ./...   # unit tests against in-memory fake IMAP/SMTP servers + end-to-e
 
 ## Security notes
 
-- Credentials only via env vars; never logged.
-- TLS by default; `insecure`/`insecure_skip_verify` are explicit opt-ins for local testing.
-- The HTTP endpoint can be protected with a bearer token (`EMAIL_MCP_AUTH_TOKEN`).
+- Credentials are carried only by client requests (header or elicitation); the server stores nothing and never logs them.
+- TLS by default; `*_insecure` / `insecure_skip_verify` query params are explicit opt-ins for local testing.
+- The HTTP endpoint can be gated with a deployment-level bearer token (`EMAIL_MCP_AUTH_TOKEN`).
 - Destructive tools are annotated (`delete_messages` has `destructiveHint`); keep a human in the loop in your client.

@@ -1,11 +1,11 @@
-// Package config loads mail account configuration.
+// Package config defines the per-request mail account description. The
+// server is stateless: every account is fully described by the request
+// (URL path domain + query params + credential header), never by a
+// server-side config file or env var.
 package config
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -31,88 +31,35 @@ type SMTPConfig struct {
 	InsecureSkipVerify bool `json:"insecure_skip_verify,omitempty"`
 }
 
-// Account is a single mail account.
+// Account is a single mail account, built per request from the URL path,
+// query params and credential headers.
 type Account struct {
 	// Email is the account's mail address, e.g. "user@gmail.com". Its domain
-	// selects the account on the HTTP endpoint: https://host/gmail.com
-	Email string `json:"email"`
+	// is the URL path: https://host/gmail.com
+	Email string
 	// DisplayName is the identity used in the From header when sending.
-	DisplayName string `json:"display_name,omitempty"`
+	DisplayName string
 	// Username for IMAP/SMTP login. Defaults to Email.
-	Username string `json:"username,omitempty"`
-	// PasswordEnv names the environment variable holding the password or
-	// app-password. If PasswordEnv is empty, Password is used directly.
-	PasswordEnv string `json:"password_env,omitempty"`
-	Password    string `json:"password,omitempty"`
+	Username string
+	// Password (or XOAUTH2 access token) supplied by the client in a
+	// credential header, or via elicitation. Never part of the URL.
+	Password string
 	// AuthMechanism selects the SASL mechanism: "plain" (default), "login",
-	// or "xoauth2" (PasswordEnv then holds the OAuth2 access token).
-	AuthMechanism string     `json:"auth_mechanism,omitempty"`
-	IMAP          IMAPConfig `json:"imap"`
-	SMTP          SMTPConfig `json:"smtp"`
+	// or "xoauth2" (Password then holds the OAuth2 access token).
+	AuthMechanism string
+	IMAP          IMAPConfig
+	SMTP          SMTPConfig
 	// SentMailbox is where copies of sent messages are stored (IMAP APPEND).
 	// Defaults to "Sent".
-	SentMailbox string `json:"sent_mailbox,omitempty"`
+	SentMailbox string
 	// DraftsMailbox is where drafts are stored. Defaults to "Drafts".
-	DraftsMailbox string `json:"drafts_mailbox,omitempty"`
+	DraftsMailbox string
 }
 
 // Domain returns the domain part of the account email, used as the URL path.
 func (a *Account) Domain() string {
 	_, domain, _ := strings.Cut(a.Email, "@")
 	return strings.ToLower(domain)
-}
-
-// ResolvePassword reads the password from the configured env var, if any.
-func (a *Account) ResolvePassword() (string, error) {
-	if a.PasswordEnv != "" {
-		v := os.Getenv(a.PasswordEnv)
-		if v == "" {
-			return "", fmt.Errorf("environment variable %s is not set", a.PasswordEnv)
-		}
-		return v, nil
-	}
-	return a.Password, nil
-}
-
-// Accounts is the root configuration: a list of accounts.
-type Accounts struct {
-	Accounts []Account `json:"accounts"`
-}
-
-// EnvVarName is the environment variable consulted for account configuration.
-// It may contain inline JSON (starting with '{') or a path to a JSON file.
-const EnvVarName = "EMAIL_MCP_ACCOUNTS"
-
-// Load reads accounts from the EMAIL_MCP_ACCOUNTS env var if set, otherwise
-// from the config file at path (default ~/.config/email-mcp/accounts.json).
-// A missing config is NOT an error in 0-config mode: an empty Accounts is
-// returned and accounts can be created per-request from query params.
-func Load(path string) (*Accounts, error) {
-	if v := os.Getenv(EnvVarName); v != "" {
-		if strings.HasPrefix(strings.TrimSpace(v), "{") {
-			return parse([]byte(v))
-		}
-		data, err := os.ReadFile(v)
-		if err != nil {
-			return nil, fmt.Errorf("reading accounts file %s: %w", v, err)
-		}
-		return parse(data)
-	}
-	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return &Accounts{}, nil
-		}
-		path = filepath.Join(home, ".config", "email-mcp", "accounts.json")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &Accounts{}, nil // 0-config mode
-		}
-		return nil, fmt.Errorf("reading accounts file %s: %w", path, err)
-	}
-	return parse(data)
 }
 
 // Normalize fills in default values.
@@ -188,27 +135,6 @@ func (a *Account) SetSMTP(host string, port int, tlsMode string) {
 		}
 	}
 	a.SMTP.Port = port
-}
-
-func parse(data []byte) (*Accounts, error) {
-	var accs Accounts
-	if err := json.Unmarshal(data, &accs); err != nil {
-		return nil, fmt.Errorf("parsing accounts JSON: %w", err)
-	}
-	seen := map[string]bool{}
-	for i := range accs.Accounts {
-		a := &accs.Accounts[i]
-		if a.Email == "" {
-			return nil, fmt.Errorf("account %d: email is required", i)
-		}
-		a.Normalize()
-		d := a.Domain()
-		if seen[d] {
-			return nil, fmt.Errorf("duplicate account for domain %q", d)
-		}
-		seen[d] = true
-	}
-	return &accs, nil
 }
 
 // FromQuery builds an account for the URL path domain from query parameters.
@@ -309,13 +235,4 @@ func FromQuery(domain string, q map[string][]string) (*Account, error) {
 
 	acc.Normalize()
 	return acc, nil
-}
-
-// ByDomain indexes accounts by email domain.
-func (a *Accounts) ByDomain() map[string]*Account {
-	m := make(map[string]*Account, len(a.Accounts))
-	for i := range a.Accounts {
-		m[a.Accounts[i].Domain()] = &a.Accounts[i]
-	}
-	return m
 }

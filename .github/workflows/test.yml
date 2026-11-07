@@ -58,4 +58,14 @@ jobs:
             sleep 0.5
           done
           curl -sf http://127.0.0.1:18080/ | grep -q '"service":"email-mcp"'
-          curl -sf -H 'Accept: text/html' http://127.0.0.1:18080/ | grep -q '<form'
+          # Browser page: OAuth how-to (no setup form anymore).
+          curl -sf -H 'Accept: text/html' http://127.0.0.1:18080/ | grep -q '/oauth/authorize'
+          # Unauthenticated /mcp must answer 401 with an OAuth challenge.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/mcp \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}')
+          test "$code" = 401
+          curl -s -D - -o /dev/null -X POST http://127.0.0.1:18080/mcp \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            | grep -qi 'www-authenticate:.*oauth-protected-resource'

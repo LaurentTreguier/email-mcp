@@ -3,6 +3,13 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
+## v0.2.1
+
+Patch release: fix the CI docker smoke test, which still asserted the old
+header-config setup form (`<form`) on the browser page at `/`; it now checks
+the OAuth how-to page and verifies that unauthenticated `POST /mcp` answers
+`401` with a `WWW-Authenticate` OAuth challenge.
+
 ## v0.2.0
 
 Second minor release. Authentication is now **OAuth 2.0 only**: the built-in

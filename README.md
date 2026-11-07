@@ -7,7 +7,7 @@ POST https://mcp.example.org/mcp
 Authorization: ****** <access token>
 ```
 
-Current release: **v0.1.0** (see [CHANGELOG.md](CHANGELOG.md)).
+Current release: **v0.2.0** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Usage
 

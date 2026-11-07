@@ -3,7 +3,11 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
-## Unreleased
+## v0.2.0
+
+Second minor release. Authentication is now **OAuth 2.0 only**: the built-in
+authorization server issues one bearer token per mail account and `POST /mcp`
+verifies it statelessly.
 
 ### Changed
 

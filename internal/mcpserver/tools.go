@@ -17,7 +17,7 @@ func registerTools(s *mcp.Server, sess *mail.Session) {
 	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "account_info",
-		Description: "Show the mail account this server endpoint is bound to (selected by the URL path domain).",
+		Description: "Show the mail account this connection is bound to (from the OAuth access token).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in accountInput) (*mcp.CallToolResult, accountOutput, error) {
 		acc := sess.Account()
 		return nil, accountOutput{Email: acc.Email, DisplayName: acc.DisplayName, Domain: acc.Domain()}, nil

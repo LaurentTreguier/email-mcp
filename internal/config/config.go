@@ -1,11 +1,13 @@
-// Package config defines the per-request mail account description. The
-// server is stateless: every account is fully described by the request
-// (URL path domain + query params + credential header), never by a
-// server-side config file or env var.
+// Package config defines the mail account description. The server is
+// stateless: every account is captured once, at OAuth consent time, and
+// travels inside the encrypted claim of the issued access token — never in
+// a server-side config file or env var.
 package config
 
 import (
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -31,18 +33,17 @@ type SMTPConfig struct {
 	InsecureSkipVerify bool
 }
 
-// Account is a single mail account, built per request from the URL path,
-// query params and credential headers.
+// Account is a single mail account, captured at OAuth consent time and
+// carried inside the issued access token.
 type Account struct {
-	// Email is the account's mail address, e.g. "user@gmail.com". Its domain
-	// is the URL path: https://host/gmail.com
+	// Email is the account's mail address, e.g. "user@gmail.com".
 	Email string
 	// DisplayName is the identity used in the From header when sending.
 	DisplayName string
 	// Username for IMAP/SMTP login. Defaults to Email.
 	Username string
-	// Password (or XOAUTH2 access token) supplied by the client in a
-	// credential header, or via elicitation. Never part of the URL.
+	// Password (or XOAUTH2 access token) captured at consent time and
+	// carried inside the access token. Never part of the URL.
 	Password string
 	// AuthMechanism selects the SASL mechanism: "plain" (default), "login",
 	// or "xoauth2" (Password then holds the OAuth2 access token).
@@ -56,7 +57,86 @@ type Account struct {
 	DraftsMailbox string
 }
 
-// Domain returns the domain part of the account email, used as the URL path.
+// AccountFromFormValues builds an account from the OAuth consent form
+// fields (the single place account configuration is entered). Empty
+// IMAP/SMTP settings are left for DNS auto-discovery.
+func AccountFromFormValues(f url.Values) (*Account, error) {
+	get := func(k string) string { return strings.TrimSpace(f.Get(k)) }
+	getBool := func(k string) bool {
+		_, ok := f[k]
+		return ok
+	}
+	getInt := func(k string) (int, error) {
+		s := get(k)
+		if s == "" {
+			return 0, nil
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 || n > 65535 {
+			return 0, fmt.Errorf("invalid %s: %q", k, s)
+		}
+		return n, nil
+	}
+
+	email := get("email")
+	local, domain, ok := strings.Cut(email, "@")
+	if !ok || local == "" || domain == "" {
+		return nil, fmt.Errorf("missing or invalid email (full mail address required, e.g. user@gmail.com)")
+	}
+	if get("password") == "" {
+		return nil, fmt.Errorf("password is required")
+	}
+
+	acc := &Account{
+		Email:         email,
+		Password:      get("password"),
+		DisplayName:   get("display_name"),
+		Username:      get("username"),
+		AuthMechanism: get("auth_mechanism"),
+		SentMailbox:   get("sent_mailbox"),
+		DraftsMailbox: get("drafts_mailbox"),
+	}
+	if acc.Username == "" {
+		acc.Username = email
+	}
+	if acc.AuthMechanism == "" {
+		acc.AuthMechanism = "plain"
+	}
+
+	imapPort, err := getInt("imap_port")
+	if err != nil {
+		return nil, err
+	}
+	smtpPort, err := getInt("smtp_port")
+	if err != nil {
+		return nil, err
+	}
+	tlsMode := func(prefix string) string {
+		switch {
+		case getBool(prefix + "_insecure"):
+			return "insecure"
+		case getBool(prefix + "_tls"):
+			return "tls"
+		case getBool(prefix + "_starttls"):
+			return "starttls"
+		}
+		return ""
+	}
+	acc.SetIMAP(get("imap_host"), imapPort, tlsMode("imap"))
+	acc.SetSMTP(get("smtp_host"), smtpPort, tlsMode("smtp"))
+	if getBool("imap_skip_verify") {
+		acc.IMAP.InsecureSkipVerify = true
+	}
+	if getBool("smtp_skip_verify") {
+		acc.SMTP.InsecureSkipVerify = true
+	}
+
+	acc.Normalize()
+	return acc, nil
+}
+
+// Domain returns the domain part of the account email (drives DNS
+// auto-discovery of the IMAP/SMTP servers).
 func (a *Account) Domain() string {
 	_, domain, _ := strings.Cut(a.Email, "@")
 	return strings.ToLower(domain)
@@ -135,105 +215,4 @@ func (a *Account) SetSMTP(host string, port int, tlsMode string) {
 		}
 	}
 	a.SMTP.Port = port
-}
-
-// FromQuery builds an account for the URL path domain from query parameters.
-// Supported params:
-//
-//	username           (required) login name: either the local part
-//	                   (e.g. "user" for /gmail.com → user@gmail.com) or a
-//	                   full address whose domain matches the path
-//	display_name       display name for the From header
-//	imap_host, imap_port, imap_tls / imap_starttls / imap_insecure
-//	smtp_host, smtp_port, smtp_tls / smtp_starttls / smtp_insecure
-//	auth_mechanism     plain (default) | login | xoauth2
-//	sent_mailbox, drafts_mailbox
-//
-// The mail address is derived as username@domain; there is no separate email
-//
-//	param. The password is never taken from the query string; it comes from a
-//	credential header or via elicitation.
-func FromQuery(domain string, q map[string][]string) (*Account, error) {
-	get := func(key string) string {
-		if v := q[key]; len(v) > 0 {
-			return v[0]
-		}
-		return ""
-	}
-	getBool := func(keys ...string) (bool, bool) {
-		for _, k := range keys {
-			if v := get(k); v != "" {
-				return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes"), true
-			}
-		}
-		return false, false
-	}
-	getInt := func(key string) (int, error) {
-		s := get(key)
-		if s == "" {
-			return 0, nil
-		}
-		var n int
-		if _, err := fmt.Sscanf(s, "%d", &n); err != nil || n <= 0 || n > 65535 {
-			return 0, fmt.Errorf("invalid %s=%q", key, s)
-		}
-		return n, nil
-	}
-
-	username := get("username")
-	if username == "" {
-		return nil, fmt.Errorf("missing required query param 'username' (local part or full address, e.g. /%s?username=user)", domain)
-	}
-	email := username
-	login := username
-	if local, dom, ok := strings.Cut(username, "@"); ok {
-		if local == "" || dom == "" {
-			return nil, fmt.Errorf("invalid username %q", username)
-		}
-		if !strings.EqualFold(dom, domain) {
-			return nil, fmt.Errorf("username %q domain does not match path domain %q", username, domain)
-		}
-	} else {
-		// Bare local part: the full address (and, by default, the login
-		// name, as most providers require it) is local@domain.
-		email = username + "@" + domain
-		login = email
-	}
-
-	acc := &Account{
-		Email:         email,
-		DisplayName:   get("display_name"),
-		Username:      login,
-		AuthMechanism: get("auth_mechanism"),
-		SentMailbox:   get("sent_mailbox"),
-		DraftsMailbox: get("drafts_mailbox"),
-	}
-	imapPort, err := getInt("imap_port")
-	if err != nil {
-		return nil, err
-	}
-	smtpPort, err := getInt("smtp_port")
-	if err != nil {
-		return nil, err
-	}
-	tlsMode := func(prefix string) string {
-		if v, ok := getBool(prefix + "_insecure"); ok && v {
-			return "insecure"
-		}
-		if v, ok := getBool(prefix + "_tls"); ok {
-			if v {
-				return "tls"
-			}
-			return "starttls"
-		}
-		if v, ok := getBool(prefix + "_starttls"); ok && v {
-			return "starttls"
-		}
-		return ""
-	}
-	acc.SetIMAP(get("imap_host"), imapPort, tlsMode("imap"))
-	acc.SetSMTP(get("smtp_host"), smtpPort, tlsMode("smtp"))
-
-	acc.Normalize()
-	return acc, nil
 }

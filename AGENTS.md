@@ -3,45 +3,57 @@
 ## What this is
 
 A Go **MCP server** that exposes any IMAP/SMTP mail account to LLM hosts over
-**MCP Streamable HTTP**. The server is **stateless**: there is no server-side
-account configuration (no config file, no `EMAIL_MCP_ACCOUNTS`). Every request
-fully describes the account:
+**MCP Streamable HTTP**. The server is **stateless** and has a **single fixed
+endpoint**:
 
 ```
-https://<host>/<domain>?username=user[&imap_host=...&smtp_host=...&...]
+POST https://<host>/mcp
 ```
 
-- The **URL path** is the plain mail domain: `/gmail.com` → domain `gmail.com`.
-- **Query params** carry identity + server overrides (below). The mail address is
-  derived as `username@domain` (`/gmail.com?username=user` is `user@gmail.com`;
-  a full address whose domain matches the path also works; the default login
-  name is the full address). Anything unset is auto-discovered via DNS
-  (SRV `_imaps/_imap/_submissions/_submission`, then MX, then
-  `imap.<domain>`/`smtp.<domain>`).
-- **Credential** comes in a request header, never in the URL:
-  `X-Email-Password: <password-or-app-password>` (custom header) or
-  `Authorization: Bearer <token>` (used as the mail credential, e.g. XOAUTH2).
-  `/.well-known/oauth-protected-resource` (RFC 9728) advertises this. Fallback:
-  MCP elicitation on the first `tools/call`.
+Authentication is **OAuth 2.0 only** — no custom headers, no per-account
+URL, no server-side configuration. The whole account setup is captured once
+at OAuth consent time and travels encrypted inside the issued access token.
+This matches MCP clients with named connections (Mistral Vibe, VS Code
+`mcp.json` `"headers"`, Claude Desktop): each connection shares the same
+`url` and differs only by its `Authorization` header.
+
+- **Auth on `/mcp`**: `Authorization: ****** <access token>` — an access
+  token from the built-in OAuth authorization server (`internal/oauthserver`);
+  the account is embedded as an AES-256-GCM-encrypted claim, verified
+  statelessly per request. Missing/invalid token → 401 +
+  `WWW-Authenticate` challenge.
+  - `/.well-known/oauth-protected-resource` (RFC 9728) →
+    `/.well-known/oauth-authorization-server` (RFC 8414) advertises the OAuth
+    flow to OAuth-aware clients.
+- **OAuth endpoints**: `POST /oauth/register` (RFC 7591 DCR),
+  `GET|POST /oauth/authorize` (HTML consent form — the single place account
+  configuration is entered — with PKCE S256),
+  `POST /oauth/token` (authorization_code + refresh_token; RS256 JWT access
+  tokens, 24h TTL), `GET /.well-known/jwks.json`.
+- **Consent-form fields** (unset IMAP/SMTP = DNS auto-discovery via SRV
+  `_imaps/_imap/_submissions/_submission`, then MX, then
+  `imap.<domain>`/`smtp.<domain>`): `email` + `password` (required),
+  `username`, `display_name`, `auth_mechanism` (`plain` default, `login`,
+  `xoauth2`), `sent_mailbox`, `drafts_mailbox`, and the IMAP/SMTP set
+  `imap_host` / `imap_port` / `imap_tls` / `imap_starttls` / `imap_insecure` /
+  `imap_skip_verify` plus the `smtp_*` twins (checkboxes). Parsed by
+  `config.AccountFromFormValues`.
 - `GET /` serves a JSON discovery doc; browsers (`Accept: text/html`) get a
-  plain HTML setup form that builds the copy-pasteable endpoint URL.
-- Optional deployment-level gate: `EMAIL_MCP_AUTH_TOKEN` env (then `Bearer`
-  must match it and is NOT a mail credential). Only other flag/env:
-  `-addr` / `EMAIL_MCP_ADDR` (default `:8080`).
-
-### Query params (all optional except `username`)
-
-`username` (required), `display_name`, `auth_mechanism` (`plain` default,
-`login`, `xoauth2`), `imap_host`, `imap_port`, `imap_tls=1`, `imap_starttls=1`,
-`imap_insecure=1` (local testing only), same set with `smtp_` prefix,
-`sent_mailbox`, `drafts_mailbox`.
+  short HTML how-to page explaining the OAuth flow.
+- Env/flags: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`),
+  `EMAIL_MCP_BASE_URL` (OAuth issuer; default derived per request),
+  `EMAIL_MCP_TOKEN_SECRET` (32-byte secret encrypting the account claim in
+  OAuth tokens; random per start if unset).
 
 ## Layout
 
 ```
 cmd/email-mcp/main.go          entrypoint: flags, http.Server, graceful shutdown
-internal/config/config.go      per-request Account struct + FromQuery(domain, q)
+internal/config/config.go      Account struct + AccountFromFormValues (consent-form parser)
 internal/discovery/discovery.go DNS SRV/MX/well-known discovery + reachability
+internal/oauthserver/          built-in OAuth 2.0 authorization server (RFC 8414/7591,
+                               PKCE auth-code + refresh, RS256 JWTs with encrypted
+                               account claim, JWKS)
 internal/mail/                 IMAP session + ops, MIME parsing, SMTP compose/send
   session.go                   lazy dial (TLS/STARTTLS/insecure), SASL, reconnect-once
   ops.go                       mailboxes, search, fetch, flags, move/copy/delete, append, quota
@@ -49,16 +61,15 @@ internal/mail/                 IMAP session + ops, MIME parsing, SMTP compose/se
   send.go                      Compose (MIME multipart, threading) + Send (SMTP + APPEND Sent)
   util.go                      nowFunc, decodeBase64 helpers
 internal/mcpserver/            MCP wiring per account (built per request)
-  server.go                    New(acc): server + elicitation middleware
+  server.go                    New(acc): server (account arrives via the OAuth token)
   tools.go                     19 tools (see below)
   resources.go                 mail:// resources + URI templates
   prompts.go                   triage_inbox, summarize_thread, draft_reply, find_unanswered
-  credentials.go               ensureCredentials: header password, else elicitation
   b64.go                       b64Encode, boolPtr helpers
 internal/httpserver/           stateless HTTP routing: New() http.Handler
-  httpserver.go                 /{domain} → per-request MCP server; / discovery; auth gate
-  form.go                      HTML setup form + result page at /
-  *_test.go, fakeimap_test.go  e2e tests over httptest + in-memory IMAP
+  httpserver.go                 POST /mcp → per-request MCP server (OAuth JWT only); / discovery; OAuth routes
+  index.go                     GET / : JSON discovery doc + browser how-to page
+  *_test.go, fakeimap_test.go  e2e tests over httptest + in-memory IMAP + full OAuth flow
 Dockerfile                     multi-stage: golang:1.27-alpine → distroless static-debian13:nonroot
 .github/workflows/test.yml     CI: go mod tidy check, verify, gofmt, build, vet, test + docker build/smoke
 .github/dependabot.yml         weekly gomod/docker/actions updates
@@ -85,6 +96,7 @@ Go 1.27.3 (`go.mod`). Direct deps (keep at latest with `go get -u ./...` +
 - `github.com/emersion/go-smtp` — SMTP submission client
 - `github.com/emersion/go-message` — MIME build/parse
 - `github.com/emersion/go-sasl` — SASL PLAIN/LOGIN/XOAUTH2
+- `github.com/golang-jwt/jwt/v5` — RS256 signing/verification for OAuth tokens
 
 ## Commands
 
@@ -100,15 +112,18 @@ go run ./cmd/email-mcp -addr :8080   # local run; try GET / with Accept: text/ht
 
 ## Conventions
 
-- **Stateless**: never add server-side account state; accounts are built per
-  request in `httpserver.buildAccount` from path + query + header.
-- **Secrets**: never in URLs, logs, or cache keys. Credential headers only
-  (`X-Email-Password`, `Authorization: Bearer`); elicitation fallback asks via
-  `writeOnly` schema field. `*_insecure`/`InsecureSkipVerify` are explicit
-  opt-ins for local testing only (carry `//nolint:gosec` with a reason).
-- Paths use the **plain domain** (`/gmail.com`), not reverse-domain.
-- Error paths: account-build failures must surface as HTTP 400 with a
-  descriptive message (see the `wrapped` handler in httpserver.go).
+- **Stateless, OAuth-only**: never add server-side account state and never
+  put account data in the URL path/query — accounts are built per request in
+  `httpserver.buildAccount` by verifying the `Authorization: ******` token with
+  `oauthserver.VerifyAccessToken`. The only MCP endpoint is `POST /mcp`.
+- **Secrets**: never in URLs, logs, or cache keys. Credentials are captured
+  only on the OAuth consent form and travel solely inside the encrypted claim
+  of the access token (AES-256-GCM with `EMAIL_MCP_TOKEN_SECRET`).
+  `*_insecure`/`*_skip_verify` consent-form options are explicit opt-ins for
+  local testing only (carry `//nolint:gosec` with a reason).
+- Error paths: auth failures on `/mcp` must surface as HTTP 401 with a
+  `WWW-Authenticate` OAuth challenge (see the `wrapped` handler in
+  httpserver.go).
 - Tests use in-memory fakes (`imapserver`, custom SMTP sink); DNS/dial hooks in
   `internal/discovery` are overridable vars for tests.
 - **Commits**: conventional commit subject ≤72 chars lowercase, body wrapped

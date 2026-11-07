@@ -3,6 +3,40 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
+## v0.2.0
+
+Second minor release. Authentication is now **OAuth 2.0 only**: the built-in
+authorization server issues one bearer token per mail account and `POST /mcp`
+verifies it statelessly.
+
+### Changed
+
+- **OAuth-only authentication**: `POST /mcp` now accepts only
+  `Authorization: ****** <access token>` issued by the built-in OAuth 2.0
+  authorization server. The `X-Email-*` custom-header path, the packed
+  base64-JSON single-header bearer, the raw-bearer-as-XOAUTH2-credential
+  fallback, MCP elicitation, and the `EMAIL_MCP_AUTH_TOKEN` deployment gate
+  are removed. Missing or invalid tokens get `401` + a `WWW-Authenticate`
+  challenge pointing at the RFC 9728 protected-resource metadata.
+- The **OAuth consent form** (`GET|POST /oauth/authorize`) is now the single
+  account-configuration surface; it gained the `imap_skip_verify` /
+  `smtp_skip_verify` checkboxes so it covers the full option set (empty
+  IMAP/SMTP settings are still auto-discovered via DNS).
+- `GET /` no longer serves a header-config setup form: API clients get the
+  JSON discovery document, browsers (`Accept: text/html`) get a short HTML
+  page explaining the OAuth flow.
+
+### Added
+
+- **Built-in OAuth 2.0 authorization server** (`internal/oauthserver`): RFC
+  8414 metadata, RFC 7591 dynamic client registration, authorization-code
+  flow with PKCE (S256) and an HTML consent form, refresh-token grant
+  (rotated), and JWKS. Access tokens are RS256 JWTs whose `account` claim is
+  the full mail account, AES-256-GCM encrypted with `EMAIL_MCP_TOKEN_SECRET`
+  — one bearer token per MCP connection carries all the connection info, and
+  `/mcp` verifies it statelessly. New env knobs: `EMAIL_MCP_BASE_URL` (OAuth
+  issuer) and `EMAIL_MCP_TOKEN_SECRET`.
+
 ## v0.1.0
 
 First minor release. A stateless Go MCP server exposing any IMAP/SMTP mail

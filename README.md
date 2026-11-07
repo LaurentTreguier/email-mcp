@@ -1,42 +1,35 @@
 # email-mcp
 
-A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP**. The server is **stateless**: there is no server-side configuration at all — every request carries the full account description (path + query params + credential header).
+A Go MCP server that exposes any IMAP/SMTP mail account to LLM hosts over **MCP Streamable HTTP**. The server is **stateless** and has a **single fixed endpoint** — authentication is **OAuth 2.0 only**: the client sends an access token issued by the built-in authorization server, and the whole account setup (captured once at consent time) travels encrypted inside that token. This is how MCP clients with named connections (Mistral Vibe, VS Code `mcp.json`, Claude Desktop, ...) carry per-connection auth:
 
-Current release: **v0.1.0** (see [CHANGELOG.md](CHANGELOG.md)).
+```
+POST https://mcp.example.org/mcp
+Authorization: ****** <access token>
+```
+
+Current release: **v0.2.0** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Usage
 
-Point the client at the domain of the mail account (the URL path) and pass the user as a query param — the mail address is `username@domain`:
+The MCP endpoint URL is always the same; each named connection differs only by its OAuth access token:
 
 ```
-https://mcp.example.org/gmail.com?username=user        # user@gmail.com
-https://mcp.example.org/gmail.com?username=user@gmail.com   # full address also works
+https://mcp.example.org/mcp
 ```
 
-- **Server settings are auto-discovered** from DNS: `_imaps._tcp` / `_imap._tcp` and `_submissions._tcp` / `_submission._tcp` SRV records (RFC 6186), falling back to the MX host (RFC 7505) and then `imap.<domain>` / `smtp.<domain>` on the well-known ports.
-- **Credentials come from the request headers** (setup-time auth, no elicitation needed):
-  - `X-Email-Password: <password-or-app-password>` — custom header, works with any client that supports custom headers
-  - `Authorization: Bearer <token>` — OAuth-style bearer; the token is used directly as the mail credential (e.g. an XOAUTH2 access token)
-  - `/.well-known/oauth-protected-resource` (RFC 9728) is served so OAuth-aware clients can discover the accepted methods
-  - if neither header is present, the server falls back to asking the user via MCP elicitation on the first tool call
-- Optional query-param overrides:
+**Authentication is OAuth 2.0 only.** email-mcp is its own OAuth 2.0 authorization server; run the flow once and store the issued token:
 
-| Param | Meaning |
-|---|---|
-| `username` | (required) local part (e.g. `user`) or full address matching the path domain; the mail address — and default login name — is `username@domain` |
-| `display_name` | From-header display name |
-| `imap_host`, `imap_port`, `imap_tls=1`, `imap_starttls=1`, `imap_insecure=1` | IMAP endpoint override |
-| `smtp_host`, `smtp_port`, `smtp_tls=1`, `smtp_starttls=1`, `smtp_insecure=1` | SMTP endpoint override |
-| `auth_mechanism` | `plain` (default), `login`, `xoauth2` |
-| `sent_mailbox`, `drafts_mailbox` | folder names (default `Sent` / `Drafts`) |
+1. Dynamic client registration (RFC 7591): `POST /oauth/register` with `{"redirect_uris":["..."]}` → `client_id` / `client_secret`.
+2. Authorization + consent: `GET /oauth/authorize?client_id=...&redirect_uri=...&state=...&scope=email&code_challenge=...&code_challenge_method=S256` (PKCE S256 required). The **consent form** is where the mail account is configured: email + password/app password (required), plus optional username, display name, auth mechanism, IMAP/SMTP host/port/TLS/STARTTLS/insecure/skip-verify overrides, and Sent/Drafts folder names. Empty IMAP/SMTP settings are auto-discovered via DNS.
+3. Token exchange: `POST /oauth/token` (`authorization_code` grant + PKCE verifier) → access token (RS256 JWT, 24h, carrying the whole account as an AES-256-GCM encrypted claim) + rotating refresh token (`refresh_token` grant).
+4. Use `Authorization: ****** <access token>` on `POST /mcp`.
 
-Example with explicit servers:
+Discovery for OAuth-aware clients: `/.well-known/oauth-protected-resource` (RFC 9728) → `/.well-known/oauth-authorization-server` (RFC 8414); JWKS at `/.well-known/jwks.json`. Unauthenticated or invalid-token `/mcp` requests get `401` + a `WWW-Authenticate` challenge pointing at the resource metadata.
 
-```
-https://mcp.example.org/example.org?username=user&imap_host=mail.example.org&imap_port=993&imap_tls=1&smtp_host=smtp.example.org&smtp_port=465&smtp_tls=1
-```
+- **Address**: the full mail address entered at consent, e.g. `user@gmail.com`. Its domain drives DNS auto-discovery when no explicit servers are configured.
+- **Server settings are auto-discovered** from the address domain via DNS: `_imaps._tcp` / `_imap._tcp` and `_submissions._tcp` / `_submission._tcp` SRV records (RFC 6186), falling back to the MX host (RFC 7505) and then `imap.<domain>` / `smtp.<domain>` on the well-known ports.
 
-`GET /` returns a JSON discovery document describing the stateless convention. **Browsers** (requests with `Accept: text/html`) instead get a plain HTML setup form at `/`: fill in your email address and the optional overrides, submit, and the page shows the ready-to-copy endpoint URL (e.g. `https://mcp.example.org/gmail.com?username=user`) — the email is split into path + `username`, and the password is *never* in the URL, it goes in a request header (see above).
+`GET /` returns a JSON discovery document; **browsers** (`Accept: text/html`) get a short HTML page at `/` explaining the OAuth flow and linking the endpoints.
 
 ## Features
 
@@ -64,55 +57,67 @@ https://mcp.example.org/example.org?username=user&imap_host=mail.example.org&ima
 
 ## Configuration
 
-There is **no server-side account configuration** — the server is stateless. Per request, the account is built from:
+There is **no server-side account configuration** — the server is stateless. The account is captured once, at OAuth consent time, and travels encrypted inside the access token; anything left unset on the consent form (IMAP/SMTP servers) is auto-discovered via DNS per request.
 
-- the URL path domain (`/gmail.com`),
-- the query params (table above): `username` (required), `display_name`, `auth_mechanism`, `imap_*`/`smtp_*` overrides, `sent_mailbox`, `drafts_mailbox` — anything unset is auto-discovered via DNS,
-- the credential header (`X-Email-Password` or `Authorization: Bearer`), else MCP elicitation.
+Server-level settings are deployment knobs only:
 
-The only server-level settings are deployment knobs: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`) and the optional endpoint gate `EMAIL_MCP_AUTH_TOKEN` (if set, `Authorization: Bearer` must match this token and is then *not* used as a mail credential — use `X-Email-Password` for that).
+| Env / flag | Meaning |
+|---|---|
+| `-addr` / `EMAIL_MCP_ADDR` | listen address (default `:8080`) |
+| `EMAIL_MCP_BASE_URL` | public base URL used as the OAuth issuer (default: derived per request from scheme+host) |
+| `EMAIL_MCP_TOKEN_SECRET` | 32-byte secret (base64 or raw) encrypting the account claim inside OAuth access tokens; random per start if unset (tokens don't survive restarts) |
+
+### OAuth endpoints
+
+`GET /.well-known/oauth-protected-resource` (RFC 9728) · `GET /.well-known/oauth-authorization-server` (RFC 8414) · `GET /.well-known/jwks.json` · `POST /oauth/register` (RFC 7591 DCR) · `GET|POST /oauth/authorize` (consent form; PKCE S256 required) · `POST /oauth/token` (`authorization_code` + `refresh_token` grants; access tokens are RS256 JWTs, 24h TTL, embedding the AES-encrypted account).
 
 ## Run
 
 ```sh
 go build -o email-mcp ./cmd/email-mcp
 ./email-mcp -addr :8080
-# stateless: https://mcp.example.org/gmail.com?username=user
+# stateless: POST https://mcp.example.org/mcp with Authorization: ****** <OAuth access token>
 # behind a reverse proxy that terminates TLS:
 # https://mcp.example.org  ->  http://127.0.0.1:8080
 ```
 
-Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`); optional `EMAIL_MCP_AUTH_TOKEN` to gate the whole endpoint.
+Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`); `EMAIL_MCP_BASE_URL` and `EMAIL_MCP_TOKEN_SECRET` for the OAuth issuer and token encryption.
 
 ### Docker
 
 ```sh
 docker build -t email-mcp .
 docker run -p 8080:8080 email-mcp
-# stateless: https://mcp.example.org/gmail.com?username=user
+# stateless: POST https://mcp.example.org/mcp with Authorization: ****** <OAuth access token>
 # (put a TLS-terminating reverse proxy in front for HTTPS)
-# optional env: -e EMAIL_MCP_AUTH_TOKEN=...
 ```
 
 The image is a multi-stage build (golang:1.27-alpine → distroless static-debian13 nonroot, `EXPOSE 8080`, entrypoint `/email-mcp`).
 
-## Client config (VS Code Copilot)
+## Client config (VS Code Copilot / Mistral Vibe named connection)
 
 ```json
 {
   "mcpServers": {
     "gmail": {
       "type": "http",
-      "url": "https://mcp.example.org/gmail.com?username=user",
+      "url": "https://mcp.example.org/mcp",
       "headers": {
-        "X-Email-Password": "${env:GMAIL_APP_PASSWORD}"
+        "Authorization": "******"
+      }
+    },
+    "work": {
+      "type": "http",
+      "url": "https://mcp.example.org/mcp",
+      "headers": {
+        "Authorization": "******"
       }
     }
   }
 }
 ```
 
-(or `"Authorization": "Bearer ${env:OAUTH_TOKEN}"` with `auth_mechanism=xoauth2`)
+Each connection uses an access token issued by the built-in OAuth flow (run register → authorize/consent → token once per account; refresh via the `refresh_token` grant when it expires). Multiple connections to different accounts are just multiple entries with the same `url` and a different bearer token.
 
 ## Development
 
@@ -122,7 +127,7 @@ go test ./...   # unit tests against in-memory fake IMAP/SMTP servers + end-to-e
 
 ## Security notes
 
-- Credentials are carried only by client requests (header or elicitation); the server stores nothing and never logs them.
-- TLS by default; `*_insecure` / `insecure_skip_verify` query params are explicit opt-ins for local testing.
-- The HTTP endpoint can be gated with a deployment-level bearer token (`EMAIL_MCP_AUTH_TOKEN`).
+- Authentication is OAuth 2.0 only: credentials are captured once at consent time and carried encrypted inside the access token; the server keeps no account state and never logs them, and they never appear in URLs.
+- OAuth access tokens are RS256 JWTs whose account claim is AES-256-GCM encrypted with `EMAIL_MCP_TOKEN_SECRET`; refresh tokens are random and rotated on use.
+- TLS by default; the `imap_insecure` / `smtp_insecure` / `*_skip_verify` consent-form options are explicit opt-ins for local testing.
 - Destructive tools are annotated (`delete_messages` has `destructiveHint`); keep a human in the loop in your client.

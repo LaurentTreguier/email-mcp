@@ -3,6 +3,7 @@ package oauthserver
 import (
 	"context"
 	"crypto/sha256"
+	"email-mcp/internal/config"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -15,6 +16,9 @@ import (
 // TestConsentFormFields checks the consent page exposes the full account
 // configuration surface (parity with the old setup form).
 func TestConsentFormFields(t *testing.T) {
+	oldVerify := VerifyAccount
+	VerifyAccount = func(acc *config.Account) error { return nil }
+	t.Cleanup(func() { VerifyAccount = oldVerify })
 	_, srv := newTestServer(t)
 
 	// Register a client.
@@ -63,6 +67,9 @@ func TestConsentFormFields(t *testing.T) {
 // TestConsentSkipVerifyRoundTrip checks the skip_verify checkboxes survive
 // into the account embedded in the issued token.
 func TestConsentSkipVerifyRoundTrip(t *testing.T) {
+	oldVerify := VerifyAccount
+	VerifyAccount = func(acc *config.Account) error { return nil }
+	t.Cleanup(func() { VerifyAccount = oldVerify })
 	s, srv := newTestServer(t)
 
 	resp, err := http.Post(srv.URL+RegisterPath, "application/json",

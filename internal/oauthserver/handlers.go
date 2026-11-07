@@ -154,6 +154,8 @@ var consentPage = template.Must(template.New("consent").Parse(`<!DOCTYPE html>
 <h1>Authorize email-mcp to access your mail account</h1>
 <p>Client <code>{{.ClientID}}</code> requests access (scope: {{.Scope}}).
 Enter the mail account to grant:</p>
+{{if .Error}}<p style="color:#b00"><strong>Setup check failed:</strong> {{.Error}}
+Please correct the fields below and submit again — no authorization was granted.</p>{{end}}
 <form method="post" action="` + AuthorizePath + `">
 <input type="hidden" name="client_id" value="{{.ClientID}}">
 <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
@@ -163,39 +165,39 @@ Enter the mail account to grant:</p>
 <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
 <fieldset>
 <legend>Account</legend>
-<p><label>email (required): <input type="text" name="email" placeholder="user@gmail.com" required></label></p>
+<p><label>email (required): <input type="text" name="email" placeholder="user@gmail.com" required{{with $.Values.Get "email"}} value="{{.}}"{{end}}></label></p>
 <p><label>password / app password (required): <input type="password" name="password" required></label></p>
-<p><label>username (login override, default: the email): <input type="text" name="username"></label></p>
-<p><label>display_name: <input type="text" name="display_name"></label></p>
+<p><label>username (login override, default: the email): <input type="text" name="username"{{with $.Values.Get "username"}} value="{{.}}"{{end}}></label></p>
+<p><label>display_name: <input type="text" name="display_name"{{with $.Values.Get "display_name"}} value="{{.}}"{{end}}></label></p>
 <p><label>auth_mechanism:
 <select name="auth_mechanism">
-<option value="">plain (default)</option>
-<option value="login">login</option>
-<option value="xoauth2">xoauth2</option>
+<option value=""{{if not ($.Values.Get "auth_mechanism")}} selected{{end}}>plain (default)</option>
+<option value="login"{{if eq ($.Values.Get "auth_mechanism") "login"}} selected{{end}}>login</option>
+<option value="xoauth2"{{if eq ($.Values.Get "auth_mechanism") "xoauth2"}} selected{{end}}>xoauth2</option>
 </select></label></p>
 </fieldset>
 <fieldset>
 <legend>IMAP (leave empty for DNS auto-discovery)</legend>
-<p><label>imap_host: <input type="text" name="imap_host" placeholder="imap.example.org"></label>
-<label>imap_port: <input type="text" name="imap_port" size="6" placeholder="993"></label></p>
-<p><label><input type="checkbox" name="imap_tls" value="1"> imap_tls</label>
-<label><input type="checkbox" name="imap_starttls" value="1"> imap_starttls</label>
-<label><input type="checkbox" name="imap_insecure" value="1"> imap_insecure (local testing only)</label>
-<label><input type="checkbox" name="imap_skip_verify" value="1"> imap_skip_verify (local testing only)</label></p>
+<p><label>imap_host: <input type="text" name="imap_host" placeholder="imap.example.org"{{with $.Values.Get "imap_host"}} value="{{.}}"{{end}}></label>
+<label>imap_port: <input type="text" name="imap_port" size="6" placeholder="993"{{with $.Values.Get "imap_port"}} value="{{.}}"{{end}}></label></p>
+<p><label><input type="checkbox" name="imap_tls" value="1"{{if $.Values.Has "imap_tls"}} checked{{end}}> imap_tls</label>
+<label><input type="checkbox" name="imap_starttls" value="1"{{if $.Values.Has "imap_starttls"}} checked{{end}}> imap_starttls</label>
+<label><input type="checkbox" name="imap_insecure" value="1"{{if $.Values.Has "imap_insecure"}} checked{{end}}> imap_insecure (local testing only)</label>
+<label><input type="checkbox" name="imap_skip_verify" value="1"{{if $.Values.Has "imap_skip_verify"}} checked{{end}}> imap_skip_verify (local testing only)</label></p>
 </fieldset>
 <fieldset>
 <legend>SMTP (leave empty for DNS auto-discovery)</legend>
-<p><label>smtp_host: <input type="text" name="smtp_host" placeholder="smtp.example.org"></label>
-<label>smtp_port: <input type="text" name="smtp_port" size="6" placeholder="465"></label></p>
-<p><label><input type="checkbox" name="smtp_tls" value="1"> smtp_tls</label>
-<label><input type="checkbox" name="smtp_starttls" value="1"> smtp_starttls</label>
-<label><input type="checkbox" name="smtp_insecure" value="1"> smtp_insecure (local testing only)</label>
-<label><input type="checkbox" name="smtp_skip_verify" value="1"> smtp_skip_verify (local testing only)</label></p>
+<p><label>smtp_host: <input type="text" name="smtp_host" placeholder="smtp.example.org"{{with $.Values.Get "smtp_host"}} value="{{.}}"{{end}}></label>
+<label>smtp_port: <input type="text" name="smtp_port" size="6" placeholder="465"{{with $.Values.Get "smtp_port"}} value="{{.}}"{{end}}></label></p>
+<p><label><input type="checkbox" name="smtp_tls" value="1"{{if $.Values.Has "smtp_tls"}} checked{{end}}> smtp_tls</label>
+<label><input type="checkbox" name="smtp_starttls" value="1"{{if $.Values.Has "smtp_starttls"}} checked{{end}}> smtp_starttls</label>
+<label><input type="checkbox" name="smtp_insecure" value="1"{{if $.Values.Has "smtp_insecure"}} checked{{end}}> smtp_insecure (local testing only)</label>
+<label><input type="checkbox" name="smtp_skip_verify" value="1"{{if $.Values.Has "smtp_skip_verify"}} checked{{end}}> smtp_skip_verify (local testing only)</label></p>
 </fieldset>
 <fieldset>
 <legend>Folders</legend>
-<p><label>sent_mailbox: <input type="text" name="sent_mailbox" placeholder="Sent"></label>
-<label>drafts_mailbox: <input type="text" name="drafts_mailbox" placeholder="Drafts"></label></p>
+<p><label>sent_mailbox: <input type="text" name="sent_mailbox" placeholder="Sent"{{with $.Values.Get "sent_mailbox"}} value="{{.}}"{{end}}></label>
+<label>drafts_mailbox: <input type="text" name="drafts_mailbox" placeholder="Drafts"{{with $.Values.Get "drafts_mailbox"}} value="{{.}}"{{end}}></label></p>
 </fieldset>
 <p><button type="submit">Authorize</button></p>
 </form>
@@ -246,7 +248,28 @@ func (s *Server) serveAuthorizeForm(w http.ResponseWriter, r *http.Request) {
 		aq.Scope = "email"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	consentPage.Execute(w, aq) //nolint:errcheck
+	consentPage.Execute(w, consentData(aq, "", nil)) //nolint:errcheck
+}
+
+// consentTemplateData is the consent page's template data: the OAuth query
+// fields plus an optional error and the submitted form values (used to
+// re-fill the form after a failed verification).
+type consentTemplateData struct {
+	authorizeQuery
+	Error  string
+	Values url.Values
+}
+
+func consentData(aq authorizeQuery, errStr string, values url.Values) consentTemplateData {
+	return consentTemplateData{authorizeQuery: aq, Error: errStr, Values: values}
+}
+
+// consentFormValues re-renders the consent form pre-filled with the
+// submitted account fields (password never re-rendered) plus an error.
+func renderConsentWithError(w http.ResponseWriter, r *http.Request, aq authorizeQuery, verr error) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = consentPage.Execute(w, consentData(aq, verr.Error(), r.PostForm)) //nolint:errcheck
 }
 
 // accountFromForm builds an account from the consent form fields.
@@ -296,6 +319,14 @@ func (s *Server) serveAuthorizeConsent(w http.ResponseWriter, r *http.Request) {
 	acc, err := accountFromForm(r)
 	if err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	// Validate the account now, with read-only checks (DNS auto-discovery +
+	// IMAP login/LIST/STATUS + SMTP EHLO/AUTH/NOOP), so a wrong password or
+	// bad server fails here with a clear message instead of surfacing as a
+	// 401 when the client first calls /mcp.
+	if err := VerifyAccount(acc); err != nil {
+		renderConsentWithError(w, r, aq, err)
 		return
 	}
 	code := randomToken(24)

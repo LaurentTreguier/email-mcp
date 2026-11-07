@@ -3,6 +3,21 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
+## Unreleased
+
+### Added
+
+- **Consent-time account validation**: the OAuth consent form now verifies
+  the submitted account before issuing an authorization code, using only
+  read-only, side-effect-free operations — DNS auto-discovery (with TCP
+  reachability check) for unset servers, IMAP dial + LOGIN/AUTHENTICATE +
+  `LIST "" "*"` + `STATUS INBOX`, and SMTP dial + EHLO + AUTH + NOOP + QUIT
+  (nothing is ever sent). On failure the consent form is re-rendered (HTTP
+  400) with the exact server error and the submitted values pre-filled
+  (password never re-rendered), so a wrong password or bad server is
+  reported immediately instead of surfacing as a 401 on the first
+  `POST /mcp`.
+
 ## v0.2.1
 
 Patch release: fix the CI docker smoke test, which still asserted the old

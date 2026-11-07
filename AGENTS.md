@@ -27,7 +27,10 @@ This matches MCP clients with named connections (Mistral Vibe, VS Code
     flow to OAuth-aware clients.
 - **OAuth endpoints**: `POST /oauth/register` (RFC 7591 DCR),
   `GET|POST /oauth/authorize` (HTML consent form — the single place account
-  configuration is entered — with PKCE S256),
+  configuration is entered — with PKCE S256; the submitted account is
+  validated with read-only checks via `verifyAccount`/`VerifyAccount`
+  (internal/oauthserver/verify.go: DNS discovery + IMAP VerifyIMAP +
+  SMTP VerifySMTP) and failures re-render the form with an error banner),
   `POST /oauth/token` (authorization_code + refresh_token; RS256 JWT access
   tokens, 24h TTL), `GET /.well-known/jwks.json`.
 - **Consent-form fields** (unset IMAP/SMTP = DNS auto-discovery via SRV
@@ -50,15 +53,16 @@ This matches MCP clients with named connections (Mistral Vibe, VS Code
 ```
 cmd/email-mcp/main.go          entrypoint: flags, http.Server, graceful shutdown
 internal/config/config.go      Account struct + AccountFromFormValues (consent-form parser)
-internal/discovery/discovery.go DNS SRV/MX/well-known discovery + reachability
+internal/discovery/discovery.go DNS SRV/MX/well-known discovery + reachability + FillDefaults
 internal/oauthserver/          built-in OAuth 2.0 authorization server (RFC 8414/7591,
                                PKCE auth-code + refresh, RS256 JWTs with encrypted
                                account claim, JWKS)
+  verify.go                    consent-time account validation (VerifyAccount hook)
 internal/mail/                 IMAP session + ops, MIME parsing, SMTP compose/send
   session.go                   lazy dial (TLS/STARTTLS/insecure), SASL, reconnect-once
-  ops.go                       mailboxes, search, fetch, flags, move/copy/delete, append, quota
+  ops.go                       mailboxes, search, fetch, flags, move/copy/delete, append, quota, VerifyIMAP
   mime.go                      header parsing, text/html extraction, BODYSTRUCTURE walk
-  send.go                      Compose (MIME multipart, threading) + Send (SMTP + APPEND Sent)
+  send.go                      Compose (MIME multipart, threading) + Send (SMTP + APPEND Sent) + VerifySMTP
   util.go                      nowFunc, decodeBase64 helpers
 internal/mcpserver/            MCP wiring per account (built per request)
   server.go                    New(acc): server (account arrives via the OAuth token)

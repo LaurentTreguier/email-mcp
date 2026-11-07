@@ -3,6 +3,7 @@ package oauthserver
 import (
 	"context"
 	"crypto/sha256"
+	"email-mcp/internal/config"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -25,6 +26,9 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 }
 
 func TestMetadataAndJWKS(t *testing.T) {
+	oldVerify := VerifyAccount
+	VerifyAccount = func(acc *config.Account) error { return nil }
+	t.Cleanup(func() { VerifyAccount = oldVerify })
 	_, srv := newTestServer(t)
 	for path, want := range map[string]string{
 		MetadataPath: `"issuer":"https://mcp.example.org"`,
@@ -43,6 +47,9 @@ func TestMetadataAndJWKS(t *testing.T) {
 }
 
 func TestFullFlowAndVerify(t *testing.T) {
+	oldVerify := VerifyAccount
+	VerifyAccount = func(acc *config.Account) error { return nil }
+	t.Cleanup(func() { VerifyAccount = oldVerify })
 	s, srv := newTestServer(t)
 
 	// Register a client.

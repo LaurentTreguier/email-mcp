@@ -472,6 +472,32 @@ const sampleMessage = "From: Alice <alice@example.org>\r\n" +
 	"\r\n" +
 	"This is the body of the hello message.\r\n"
 
+func TestVerifyIMAP(t *testing.T) {
+	b := newFakeBackend()
+	b.addMessage("INBOX", sampleMessage)
+	addr := startFakeIMAP(t, b)
+	s := testSession(t, addr)
+	if err := s.VerifyIMAP(); err != nil {
+		t.Fatalf("VerifyIMAP: %v", err)
+	}
+}
+
+func TestVerifyIMAPBadPassword(t *testing.T) {
+	b := newFakeBackend()
+	addr := startFakeIMAP(t, b)
+	acc := &config.Account{
+		Email:    "user@example.com",
+		Username: "user@example.com",
+		Password: "wrong",
+		IMAP:     config.IMAPConfig{Host: hostOf(addr), Port: portOf(addr), Insecure: true},
+	}
+	s := NewSession(acc)
+	defer s.Close()
+	if err := s.VerifyIMAP(); err == nil {
+		t.Fatal("expected error for wrong password")
+	}
+}
+
 func TestListAndStatus(t *testing.T) {
 	b := newFakeBackend()
 	b.addMessage("INBOX", sampleMessage)

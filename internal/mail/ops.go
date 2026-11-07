@@ -33,6 +33,19 @@ type MailboxStatus struct {
 	Size        *int64  `json:"size,omitempty"`
 }
 
+// VerifyIMAP checks that the IMAP server is reachable and the credentials
+// are accepted, using only read-only commands: dial + LOGIN/AUTHENTICATE,
+// LIST "" "*", STATUS INBOX. Used to validate an account at setup time.
+func (s *Session) VerifyIMAP() error {
+	if _, err := s.ListMailboxes("*", false, false); err != nil {
+		return err
+	}
+	if _, err := s.MailboxStatus("INBOX"); err != nil {
+		return fmt.Errorf("STATUS INBOX: %w", err)
+	}
+	return nil
+}
+
 // Address is a simplified mail address.
 type Address struct {
 	Name  string `json:"name,omitempty"`

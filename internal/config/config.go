@@ -142,6 +142,12 @@ func (a *Account) Domain() string {
 	return strings.ToLower(domain)
 }
 
+// IMAPHost returns the configured IMAP host ("" = auto-discover).
+func (a *Account) IMAPHost() string { return a.IMAP.Host }
+
+// SMTPHost returns the configured SMTP host ("" = auto-discover).
+func (a *Account) SMTPHost() string { return a.SMTP.Host }
+
 // Normalize fills in default values.
 func (a *Account) Normalize() {
 	if a.Username == "" {

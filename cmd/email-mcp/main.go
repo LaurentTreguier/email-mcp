@@ -4,10 +4,10 @@
 //
 //	https://mcp.example.org/mcp
 //
-// The whole account setup travels in the client's X-Email-* request headers
-// (X-Email-Address required; X-Email-Password or an Authorization Bearer
-// token for the credential; optional IMAP/SMTP overrides, else DNS
-// auto-discovery).
+// Authentication is OAuth 2.0 only: the client sends an access token issued
+// by the built-in authorization server as Authorization: ******; the whole
+// account setup (captured at consent time) travels encrypted inside the
+// token. Unset IMAP/SMTP servers are auto-discovered via DNS.
 package main
 
 import (
@@ -28,8 +28,8 @@ func main() {
 	flag.Parse()
 
 	log.Printf("email-mcp: stateless — single MCP endpoint at /mcp;")
-	log.Printf("             account via Authorization bearer (OAuth JWT or packed base64 JSON) or X-Email-* headers,")
-	log.Printf("             server settings via DNS auto-discovery or headers, credentials via header or elicitation")
+	log.Printf("             auth via OAuth 2.0 bearer token (account embedded, encrypted),")
+	log.Printf("             server settings via DNS auto-discovery or the consent form")
 	if v := os.Getenv("EMAIL_MCP_BASE_URL"); v != "" {
 		log.Printf("             OAuth authorization server issuer: %s", v)
 	} else {

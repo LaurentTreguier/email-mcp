@@ -180,7 +180,8 @@ Enter the mail account to grant:</p>
 <label>imap_port: <input type="text" name="imap_port" size="6" placeholder="993"></label></p>
 <p><label><input type="checkbox" name="imap_tls" value="1"> imap_tls</label>
 <label><input type="checkbox" name="imap_starttls" value="1"> imap_starttls</label>
-<label><input type="checkbox" name="imap_insecure" value="1"> imap_insecure (local testing only)</label></p>
+<label><input type="checkbox" name="imap_insecure" value="1"> imap_insecure (local testing only)</label>
+<label><input type="checkbox" name="imap_skip_verify" value="1"> imap_skip_verify (local testing only)</label></p>
 </fieldset>
 <fieldset>
 <legend>SMTP (leave empty for DNS auto-discovery)</legend>
@@ -188,7 +189,8 @@ Enter the mail account to grant:</p>
 <label>smtp_port: <input type="text" name="smtp_port" size="6" placeholder="465"></label></p>
 <p><label><input type="checkbox" name="smtp_tls" value="1"> smtp_tls</label>
 <label><input type="checkbox" name="smtp_starttls" value="1"> smtp_starttls</label>
-<label><input type="checkbox" name="smtp_insecure" value="1"> smtp_insecure (local testing only)</label></p>
+<label><input type="checkbox" name="smtp_insecure" value="1"> smtp_insecure (local testing only)</label>
+<label><input type="checkbox" name="smtp_skip_verify" value="1"> smtp_skip_verify (local testing only)</label></p>
 </fieldset>
 <fieldset>
 <legend>Folders</legend>
@@ -252,62 +254,7 @@ func accountFromForm(r *http.Request) (*config.Account, error) {
 	if err := r.ParseForm(); err != nil {
 		return nil, err
 	}
-	f := r.PostForm
-	get := func(k string) string { return strings.TrimSpace(f.Get(k)) }
-	if get("email") == "" || get("password") == "" {
-		return nil, fmt.Errorf("email and password are required")
-	}
-	// Build directly from the form fields (config.FromHeaders would treat a
-	// packed bearer in Authorization first; the consent form has none).
-	h := headerFromForm(f)
-	acc, err := config.FromHeaders(h)
-	if err != nil {
-		return nil, err
-	}
-	// The password comes from the dedicated form field, not a header.
-	acc.Password = get("password")
-	if acc.AuthMechanism == "" {
-		acc.AuthMechanism = "plain"
-	}
-	return acc, nil
-}
-
-// headerFromForm maps consent-form fields onto X-Email-* headers so
-// config.FromHeaders can build the account.
-func headerFromForm(f url.Values) http.Header {
-	h := http.Header{}
-	set := func(formKey, header string) {
-		if v := strings.TrimSpace(f.Get(formKey)); v != "" {
-			h.Set(header, v)
-		}
-	}
-	set("email", config.HeaderAddress)
-	set("username", config.HeaderUsername)
-	set("display_name", config.HeaderDisplayName)
-	set("auth_mechanism", config.HeaderAuthMech)
-	set("sent_mailbox", config.HeaderSentMailbox)
-	set("drafts_mailbox", config.HeaderDraftsMailbox)
-	// text inputs
-	set("imap_host", config.HeaderIMAPHost)
-	set("imap_port", config.HeaderIMAPPort)
-	set("smtp_host", config.HeaderSMTPHost)
-	set("smtp_port", config.HeaderSMTPPort)
-	// checkboxes: value "1", or bare name (normalize to "1")
-	for _, b := range []struct{ form, header string }{
-		{"imap_tls", config.HeaderIMAPTLS},
-		{"imap_starttls", config.HeaderIMAPStartTLS},
-		{"imap_insecure", config.HeaderIMAPInsecure},
-		{"imap_skip_verify", config.HeaderIMAPSkipVerify},
-		{"smtp_tls", config.HeaderSMTPTLS},
-		{"smtp_starttls", config.HeaderSMTPStartTLS},
-		{"smtp_insecure", config.HeaderSMTPInsecure},
-		{"smtp_skip_verify", config.HeaderSMTPSkipVerify},
-	} {
-		if _, ok := f[b.form]; ok {
-			h.Set(b.header, "true")
-		}
-	}
-	return h
+	return config.AccountFromFormValues(r.PostForm)
 }
 
 func (s *Server) serveAuthorizeConsent(w http.ResponseWriter, r *http.Request) {

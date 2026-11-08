@@ -3,7 +3,11 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
-## Unreleased
+## v0.4.0
+
+Minor release (breaking on 0.x): restart-stable OAuth runtime configuration,
+plus the consent form no longer exposes local-testing-only fields in
+production.
 
 ### Changed
 
@@ -13,10 +17,6 @@ semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
   (`GET /oauth/authorize`) are now only rendered when the request arrives
   over plain HTTP (development); over TLS (production) they are omitted.
   The submitted form values are still honored if POSTed directly.
-
-## Unreleased
-
-### Changed
 
 - **Restart-stable OAuth configuration (breaking)**: the RS256 signing key
   is no longer generated per start. `EMAIL_MCP_SIGNING_KEY` (PEM text, or

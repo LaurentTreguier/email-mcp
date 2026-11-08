@@ -9,10 +9,10 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"email-mcp/internal/config"
+	"email-mcp/internal/httputil"
 )
 
 //go:embed templates/consent.html
@@ -37,13 +37,7 @@ func (s *Server) issuerFor(r *http.Request) string {
 	if s.baseURL != "" {
 		return s.baseURL
 	}
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	} else if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
-		scheme = strings.TrimSpace(strings.Split(p, ",")[0])
-	}
-	return scheme + "://" + r.Host
+	return httputil.Scheme(r) + "://" + r.Host
 }
 
 func (s *Server) serveMetadata(w http.ResponseWriter, r *http.Request) {
@@ -204,8 +198,10 @@ func (s *Server) serveAuthorizeForm(w http.ResponseWriter, r *http.Request) {
 // consentTemplateData is the consent page's template data: the OAuth query
 // fields plus an optional error and the submitted form values (used to
 // re-fill the form after a failed verification). Dev marks development
-// deployments (plain HTTP, no TLS): only then does the form expose the
-// "local testing only" insecure/skip-verify checkboxes.
+// deployments (clients reach the server over plain HTTP): only then does
+// the form expose the "local testing only" insecure/skip-verify checkboxes.
+// TLS detection honors X-Forwarded-Proto, so production behind a
+// TLS-terminating reverse proxy correctly counts as TLS and hides them.
 type consentTemplateData struct {
 	authorizeQuery
 	Action string
@@ -215,7 +211,7 @@ type consentTemplateData struct {
 }
 
 func consentData(r *http.Request, aq authorizeQuery, errStr string, values url.Values) consentTemplateData {
-	return consentTemplateData{authorizeQuery: aq, Action: AuthorizePath, Error: errStr, Values: values, Dev: r.TLS == nil}
+	return consentTemplateData{authorizeQuery: aq, Action: AuthorizePath, Error: errStr, Values: values, Dev: !httputil.TLSEnabled(r)}
 }
 
 // consentFormValues re-renders the consent form pre-filled with the

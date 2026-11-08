@@ -3,6 +3,20 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
+## Unreleased
+
+### Fixed
+
+- **Consent form "local testing only" fields are now hidden based on the
+  client-facing scheme, not the raw connection**: the `imap_insecure` /
+  `imap_skip_verify` / `smtp_insecure` / `smtp_skip_verify` checkboxes on
+  the OAuth consent page are now only rendered when clients reach the server
+  over plain HTTP. The new shared `internal/httputil.TLSEnabled` check honors
+  `X-Forwarded-Proto: https`, so production behind a TLS-terminating reverse
+  proxy (where the Go server itself always sees plain HTTP) correctly hides
+  them, while local dev servers work on any hostname or LAN IP over plain
+  HTTP. Submitted form values are still honored if POSTed directly.
+
 ## v0.4.2
 
 Patch release (hotfix): fix consent-time IMAP validation on IMAP4rev1-only

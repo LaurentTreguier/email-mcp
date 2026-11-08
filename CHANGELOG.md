@@ -3,6 +3,14 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
+## v0.4.1
+
+Patch release: fix the CI docker smoke test, which mounted the generated
+signing key at `/key.pem` inside the distroless nonroot container — the file
+was unreadable by the container user, so the container exited at startup and
+the smoke test failed. The key is now passed inline via `EMAIL_MCP_SIGNING_KEY`
+as base64-encoded PEM.
+
 ## v0.4.0
 
 Minor release (breaking on 0.x): restart-stable OAuth runtime configuration,

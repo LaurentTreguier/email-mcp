@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"email-mcp/internal/httputil"
 	"email-mcp/internal/oauthserver"
 )
 
@@ -24,7 +25,7 @@ func wantsHTML(r *http.Request) bool {
 // short HTML page for browsers explaining the OAuth-only setup.
 func serveRoot(w http.ResponseWriter, r *http.Request) {
 	if wantsHTML(r) {
-		base := scheme(r) + "://" + r.Host
+		base := httputil.Scheme(r) + "://" + r.Host
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		howtoPage.Execute(w, map[string]string{ //nolint:errcheck
 			"Base":       base,

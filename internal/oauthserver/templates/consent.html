@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>email-mcp — authorize mail access</title></head>
+<body>
+<h1>Authorize email-mcp to access your mail account</h1>
+<p>Client <code>{{.ClientID}}</code> requests access (scope: {{.Scope}}).
+Enter the mail account to grant:</p>
+{{if .Error}}<p style="color:#b00"><strong>Setup check failed:</strong> {{.Error}}
+Please correct the fields below and submit again — no authorization was granted.</p>{{end}}
+<form method="post" action="{{.Action}}">
+<input type="hidden" name="client_id" value="{{.ClientID}}">
+<input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
+<input type="hidden" name="state" value="{{.State}}">
+<input type="hidden" name="scope" value="{{.Scope}}">
+<input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
+<input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
+<fieldset>
+<legend>Account</legend>
+<p><label>email (required): <input type="text" name="email" placeholder="user@gmail.com" required{{with $.Values.Get "email"}} value="{{.}}"{{end}}></label></p>
+<p><label>password / app password (required): <input type="password" name="password" required></label></p>
+<p><label>username (login override, default: the email): <input type="text" name="username"{{with $.Values.Get "username"}} value="{{.}}"{{end}}></label></p>
+<p><label>display_name: <input type="text" name="display_name"{{with $.Values.Get "display_name"}} value="{{.}}"{{end}}></label></p>
+<p><label>auth_mechanism:
+<select name="auth_mechanism">
+<option value=""{{if not ($.Values.Get "auth_mechanism")}} selected{{end}}>plain (default)</option>
+<option value="login"{{if eq ($.Values.Get "auth_mechanism") "login"}} selected{{end}}>login</option>
+<option value="xoauth2"{{if eq ($.Values.Get "auth_mechanism") "xoauth2"}} selected{{end}}>xoauth2</option>
+</select></label></p>
+</fieldset>
+<fieldset>
+<legend>IMAP (leave empty for DNS auto-discovery)</legend>
+<p><label>imap_host: <input type="text" name="imap_host" placeholder="imap.example.org"{{with $.Values.Get "imap_host"}} value="{{.}}"{{end}}></label>
+<label>imap_port: <input type="text" name="imap_port" size="6" placeholder="993"{{with $.Values.Get "imap_port"}} value="{{.}}"{{end}}></label></p>
+<p><label><input type="checkbox" name="imap_tls" value="1"{{if $.Values.Has "imap_tls"}} checked{{end}}> imap_tls</label>
+<label><input type="checkbox" name="imap_starttls" value="1"{{if $.Values.Has "imap_starttls"}} checked{{end}}> imap_starttls</label>
+<label><input type="checkbox" name="imap_insecure" value="1"{{if $.Values.Has "imap_insecure"}} checked{{end}}> imap_insecure (local testing only)</label>
+<label><input type="checkbox" name="imap_skip_verify" value="1"{{if $.Values.Has "imap_skip_verify"}} checked{{end}}> imap_skip_verify (local testing only)</label></p>
+</fieldset>
+<fieldset>
+<legend>SMTP (leave empty for DNS auto-discovery)</legend>
+<p><label>smtp_host: <input type="text" name="smtp_host" placeholder="smtp.example.org"{{with $.Values.Get "smtp_host"}} value="{{.}}"{{end}}></label>
+<label>smtp_port: <input type="text" name="smtp_port" size="6" placeholder="465"{{with $.Values.Get "smtp_port"}} value="{{.}}"{{end}}></label></p>
+<p><label><input type="checkbox" name="smtp_tls" value="1"{{if $.Values.Has "smtp_tls"}} checked{{end}}> smtp_tls</label>
+<label><input type="checkbox" name="smtp_starttls" value="1"{{if $.Values.Has "smtp_starttls"}} checked{{end}}> smtp_starttls</label>
+<label><input type="checkbox" name="smtp_insecure" value="1"{{if $.Values.Has "smtp_insecure"}} checked{{end}}> smtp_insecure (local testing only)</label>
+<label><input type="checkbox" name="smtp_skip_verify" value="1"{{if $.Values.Has "smtp_skip_verify"}} checked{{end}}> smtp_skip_verify (local testing only)</label></p>
+</fieldset>
+<fieldset>
+<legend>Folders</legend>
+<p><label>sent_mailbox: <input type="text" name="sent_mailbox" placeholder="Sent"{{with $.Values.Get "sent_mailbox"}} value="{{.}}"{{end}}></label>
+<label>drafts_mailbox: <input type="text" name="drafts_mailbox" placeholder="Drafts"{{with $.Values.Get "drafts_mailbox"}} value="{{.}}"{{end}}></label></p>
+</fieldset>
+<p><button type="submit">Authorize</button></p>
+</form>
+</body>
+</html>

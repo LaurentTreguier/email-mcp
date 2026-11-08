@@ -58,6 +58,7 @@ internal/oauthserver/          built-in OAuth 2.0 authorization server (RFC 8414
                                PKCE auth-code + refresh, RS256 JWTs with encrypted
                                account claim, JWKS)
   verify.go                    consent-time account validation (VerifyAccount hook)
+  templates/consent.html       consent form page (go:embed + template.ParseFS)
 internal/mail/                 IMAP session + ops, MIME parsing, SMTP compose/send
   session.go                   lazy dial (TLS/STARTTLS/insecure), SASL, reconnect-once
   ops.go                       mailboxes, search, fetch, flags, move/copy/delete, append, quota, VerifyIMAP
@@ -73,6 +74,7 @@ internal/mcpserver/            MCP wiring per account (built per request)
 internal/httpserver/           stateless HTTP routing: New() http.Handler
   httpserver.go                 POST /mcp → per-request MCP server (OAuth JWT only); / discovery; OAuth routes
   index.go                     GET / : JSON discovery doc + browser how-to page
+  templates/howto.html         browser how-to page (go:embed + template.ParseFS)
   *_test.go, fakeimap_test.go  e2e tests over httptest + in-memory IMAP + full OAuth flow
 Dockerfile                     multi-stage: golang:1.27-alpine → distroless static-debian13:nonroot
 .github/workflows/test.yml     CI: go mod tidy check, verify, gofmt, build, vet, test + docker build/smoke

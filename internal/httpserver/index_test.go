@@ -26,7 +26,7 @@ func get(t *testing.T, h http.Handler, path, accept string) (int, string, http.H
 }
 
 func TestRootHowToPageForBrowser(t *testing.T) {
-	h := New()
+	h := newTestHandler(t)
 	code, body, hdr := get(t, h, "/", "text/html,application/xhtml+xml")
 	if code != 200 {
 		t.Fatalf("status = %d", code)
@@ -50,7 +50,7 @@ func TestRootHowToPageForBrowser(t *testing.T) {
 }
 
 func TestRootJSONForClients(t *testing.T) {
-	h := New()
+	h := newTestHandler(t)
 	code, body, hdr := get(t, h, "/", "application/json")
 	if code != 200 {
 		t.Fatalf("status = %d", code)

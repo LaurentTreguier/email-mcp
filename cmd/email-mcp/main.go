@@ -35,10 +35,24 @@ func main() {
 	} else {
 		log.Printf("             OAuth authorization server issuer derived per request (set EMAIL_MCP_BASE_URL to fix it)")
 	}
+	switch {
+	case os.Getenv("EMAIL_MCP_SIGNING_KEY_FILE") != "":
+		log.Printf("             OAuth signing key: EMAIL_MCP_SIGNING_KEY_FILE=%s", os.Getenv("EMAIL_MCP_SIGNING_KEY_FILE"))
+	case os.Getenv("EMAIL_MCP_SIGNING_KEY") != "":
+		log.Printf("             OAuth signing key: EMAIL_MCP_SIGNING_KEY (inline PEM)")
+	}
+	if os.Getenv("EMAIL_MCP_TOKEN_SECRET") != "" {
+		log.Printf("             OAuth token secret: EMAIL_MCP_TOKEN_SECRET (stable across restarts)")
+	}
+
+	handler, err := httpserver.New()
+	if err != nil {
+		log.Fatalf("startup: %v — set EMAIL_MCP_SIGNING_KEY or EMAIL_MCP_SIGNING_KEY_FILE (PEM RSA private key) and EMAIL_MCP_TOKEN_SECRET (32 bytes) so issued tokens survive restarts", err)
+	}
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           httpserver.New(),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

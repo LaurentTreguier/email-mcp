@@ -51,7 +51,14 @@ jobs:
 
       - name: smoke test container
         run: |
-          docker run -d -p 18080:8080 --name email-mcp-ci email-mcp:ci
+          # Fail-fast startup requires a stable signing key + token secret;
+          # generate an ephemeral RSA key for the smoke test.
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/email-mcp-ci-key.pem
+          docker run -d -p 18080:8080 --name email-mcp-ci \
+            -e EMAIL_MCP_SIGNING_KEY_FILE=/key.pem \
+            -e EMAIL_MCP_TOKEN_SECRET=ci-smoke-test-secret-32bytes!! \
+            -v /tmp/email-mcp-ci-key.pem:/key.pem:ro \
+            email-mcp:ci
           trap 'docker stop email-mcp-ci >/dev/null 2>&1; docker rm email-mcp-ci >/dev/null 2>&1' EXIT
           for i in $(seq 1 20); do
             curl -sf http://127.0.0.1:18080/ && break
@@ -69,3 +76,8 @@ jobs:
             -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
             | grep -qi 'www-authenticate:.*oauth-protected-resource'
+          # Fail-fast: a container without the required env must refuse to start.
+          if docker run --rm email-mcp:ci >/dev/null 2>&1; then
+            echo 'ERROR: container started without EMAIL_MCP_SIGNING_KEY/EMAIL_MCP_TOKEN_SECRET'
+            exit 1
+          fi

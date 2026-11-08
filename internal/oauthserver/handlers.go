@@ -198,21 +198,24 @@ func (s *Server) serveAuthorizeForm(w http.ResponseWriter, r *http.Request) {
 		aq.Scope = "email"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	consentPage.Execute(w, consentData(aq, "", nil)) //nolint:errcheck
+	consentPage.Execute(w, consentData(r, aq, "", nil)) //nolint:errcheck
 }
 
 // consentTemplateData is the consent page's template data: the OAuth query
 // fields plus an optional error and the submitted form values (used to
-// re-fill the form after a failed verification).
+// re-fill the form after a failed verification). Dev marks development
+// deployments (plain HTTP, no TLS): only then does the form expose the
+// "local testing only" insecure/skip-verify checkboxes.
 type consentTemplateData struct {
 	authorizeQuery
 	Action string
 	Error  string
 	Values url.Values
+	Dev    bool
 }
 
-func consentData(aq authorizeQuery, errStr string, values url.Values) consentTemplateData {
-	return consentTemplateData{authorizeQuery: aq, Action: AuthorizePath, Error: errStr, Values: values}
+func consentData(r *http.Request, aq authorizeQuery, errStr string, values url.Values) consentTemplateData {
+	return consentTemplateData{authorizeQuery: aq, Action: AuthorizePath, Error: errStr, Values: values, Dev: r.TLS == nil}
 }
 
 // consentFormValues re-renders the consent form pre-filled with the
@@ -220,7 +223,7 @@ func consentData(aq authorizeQuery, errStr string, values url.Values) consentTem
 func renderConsentWithError(w http.ResponseWriter, r *http.Request, aq authorizeQuery, verr error) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusBadRequest)
-	_ = consentPage.Execute(w, consentData(aq, verr.Error(), r.PostForm)) //nolint:errcheck
+	_ = consentPage.Execute(w, consentData(r, aq, verr.Error(), r.PostForm)) //nolint:errcheck
 }
 
 // accountFromForm builds an account from the consent form fields.

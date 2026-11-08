@@ -2,10 +2,14 @@ package oauthserver
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"email-mcp/internal/config"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,9 +18,33 @@ import (
 	"testing"
 )
 
+// testSigningKeyPEM returns a freshly generated RSA key in PKCS#8 PEM form.
+func testSigningKeyPEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+}
+
+// testOptions returns Options with a generated signing key and fixed secret.
+func testOptions(t *testing.T) *Options {
+	t.Helper()
+	return &Options{
+		BaseURL:       "https://mcp.example.org",
+		SigningKeyPEM: testSigningKeyPEM(t),
+		TokenSecret:   []byte("0123456789abcdef0123456789abcdef"),
+	}
+}
+
 func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
-	s, err := New(&Options{BaseURL: "https://mcp.example.org"})
+	s, err := New(testOptions(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,4 +203,138 @@ func mustQuery(t *testing.T, loc, key string) string {
 		t.Fatalf("missing %s in %s", key, loc)
 	}
 	return v
+}
+
+// issueTestToken runs register + consent + token exchange against srv and
+// returns an access token.
+func issueTestToken(t *testing.T, srv string) string {
+	t.Helper()
+	oldVerify := VerifyAccount
+	VerifyAccount = func(acc *config.Account) error { return nil }
+	t.Cleanup(func() { VerifyAccount = oldVerify })
+
+	resp, err := http.Post(srv+RegisterPath, "application/json",
+		strings.NewReader(`{"redirect_uris":["http://localhost/cb"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	json.NewDecoder(resp.Body).Decode(&reg) //nolint:errcheck
+	resp.Body.Close()
+
+	verifier := "restart-verifier"
+	sum := sha256.Sum256([]byte(verifier))
+	form := url.Values{
+		"client_id":             {reg.ClientID},
+		"redirect_uri":          {"http://localhost/cb"},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(sum[:])},
+		"code_challenge_method": {"S256"},
+		"email":                 {"user@example.org"},
+		"password":              {"secret"},
+	}
+	noRedir := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err = noRedir.PostForm(srv+AuthorizePath, form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := mustQuery(t, resp.Header.Get("Location"), "code")
+	resp.Body.Close()
+
+	resp, err = http.PostForm(srv+TokenPath, url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"http://localhost/cb"},
+		"code_verifier": {verifier},
+		"client_id":     {reg.ClientID},
+		"client_secret": {reg.ClientSecret},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tok struct {
+		AccessToken string `json:"access_token"`
+	}
+	json.NewDecoder(resp.Body).Decode(&tok) //nolint:errcheck
+	resp.Body.Close()
+	if tok.AccessToken == "" {
+		t.Fatal("no access token issued")
+	}
+	return tok.AccessToken
+}
+
+// TestTokenSurvivesRestart proves that with a configured signing key and
+// token secret, an access token issued before a "restart" (a second New with
+// the same PEM/secret) still verifies afterwards — same kid, same AEAD key.
+func TestTokenSurvivesRestart(t *testing.T) {
+	opts := testOptions(t)
+	s1, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv1 := httptest.NewServer(s1.Handler())
+	defer srv1.Close()
+	token := issueTestToken(t, srv1.URL)
+	srv1.Close()
+
+	// Simulated restart: new process, same configured key + secret.
+	s2, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.keyID != s1.keyID {
+		t.Fatalf("kid changed across restart: %s vs %s", s2.keyID, s1.keyID)
+	}
+	acc, err := s2.VerifyAccessToken(context.Background(), token)
+	if err != nil {
+		t.Fatalf("token issued before restart rejected after restart: %v", err)
+	}
+	if acc.Email != "user@example.org" {
+		t.Errorf("recovered account = %+v", acc)
+	}
+}
+
+func TestNewRequiresSigningKey(t *testing.T) {
+	if _, err := New(&Options{TokenSecret: []byte("0123456789abcdef0123456789abcdef")}); err == nil {
+		t.Fatal("expected error when SigningKeyPEM is missing")
+	}
+	if _, err := New(&Options{SigningKeyPEM: []byte("not pem")}); err == nil {
+		t.Fatal("expected error for invalid PEM")
+	}
+}
+
+func TestNewRequiresTokenSecret(t *testing.T) {
+	if _, err := New(&Options{SigningKeyPEM: testSigningKeyPEM(t)}); err == nil {
+		t.Fatal("expected error when TokenSecret is missing")
+	}
+	if _, err := New(&Options{SigningKeyPEM: testSigningKeyPEM(t), TokenSecret: []byte("short")}); err == nil {
+		t.Fatal("expected error when TokenSecret is not 32 bytes")
+	}
+}
+
+// TestParseSigningKeyPEM accepts both PKCS#8 and PKCS#1 PEM encodings.
+func TestParseSigningKeyPEM(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs8 := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: func() []byte {
+		der, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return der
+	}()})
+	pkcs1 := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	for name, p := range map[string][]byte{"pkcs8": pkcs8, "pkcs1": pkcs1} {
+		got, err := ParseSigningKeyPEM(p)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got.N.Cmp(key.N) != 0 {
+			t.Errorf("%s: wrong key", name)
+		}
+	}
 }

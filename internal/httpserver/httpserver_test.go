@@ -2,14 +2,19 @@ package httpserver
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -18,6 +23,126 @@ import (
 	"email-mcp/internal/config"
 	"email-mcp/internal/oauthserver"
 )
+
+// newTestHandler sets the required OAuth env config (fresh signing key +
+// fixed token secret) and returns the handler, like production with
+// EMAIL_MCP_SIGNING_KEY and EMAIL_MCP_TOKEN_SECRET set.
+func newTestHandler(t *testing.T) http.Handler {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EMAIL_MCP_SIGNING_KEY", string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})))
+	t.Setenv("EMAIL_MCP_TOKEN_SECRET", "0123456789abcdef0123456789abcdef")
+	h, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// TestNewFailsFastWithoutRequiredConfig checks the fail-fast startup: with
+// no signing key / token secret in the environment, New must error instead of
+// starting a server whose tokens die on the next restart.
+func TestNewFailsFastWithoutRequiredConfig(t *testing.T) {
+	// t.Setenv cannot unset; use empty values which the env reader treats as unset.
+	t.Setenv("EMAIL_MCP_SIGNING_KEY", "")
+	t.Setenv("EMAIL_MCP_SIGNING_KEY_FILE", "")
+	t.Setenv("EMAIL_MCP_TOKEN_SECRET", "")
+	if _, err := New(); err == nil {
+		t.Fatal("expected startup error without signing key and token secret")
+	}
+}
+
+// TestNewReadsSigningKeyFile checks that EMAIL_MCP_SIGNING_KEY_FILE (mounted
+// secret) takes precedence and is read from disk.
+func TestNewReadsSigningKeyFile(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemFile := t.TempDir() + `\key.pem`
+	if err := os.WriteFile(pemFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EMAIL_MCP_SIGNING_KEY", "")
+	t.Setenv("EMAIL_MCP_SIGNING_KEY_FILE", pemFile)
+	t.Setenv("EMAIL_MCP_TOKEN_SECRET", "0123456789abcdef0123456789abcdef")
+	if _, err := New(); err != nil {
+		t.Fatalf("New with EMAIL_MCP_SIGNING_KEY_FILE: %v", err)
+	}
+}
+
+// TestNewAcceptsBase64SigningKey checks that EMAIL_MCP_SIGNING_KEY may carry
+// the PEM base64-encoded (env vars don't preserve newlines).
+func TestNewAcceptsBase64SigningKey(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	t.Setenv("EMAIL_MCP_SIGNING_KEY", base64.StdEncoding.EncodeToString(pemBytes))
+	t.Setenv("EMAIL_MCP_SIGNING_KEY_FILE", "")
+	t.Setenv("EMAIL_MCP_TOKEN_SECRET", "0123456789abcdef0123456789abcdef")
+	h, err := New()
+	if err != nil {
+		t.Fatalf("New with base64 EMAIL_MCP_SIGNING_KEY: %v", err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/.well-known/jwks.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("jwks status = %d", resp.StatusCode)
+	}
+}
+
+// TestTokenSecretRawVsBase64 checks the secret parsing: a plain 32-char
+// string is used raw, a base64 value is decoded, and anything else is
+// rejected by oauthserver.New (not 32 bytes after decoding).
+func TestTokenSecretRawVsBase64(t *testing.T) {
+	raw := "0123456789abcdef0123456789abcdef" // exactly 32 chars
+	b64 := base64.StdEncoding.EncodeToString([]byte("fedcba9876543210fedcba9876543210"))
+	for name, v := range map[string]string{"raw32": raw, "base64": b64} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("EMAIL_MCP_SIGNING_KEY", string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: mustPKCS8(t)})))
+			t.Setenv("EMAIL_MCP_SIGNING_KEY_FILE", "")
+			t.Setenv("EMAIL_MCP_TOKEN_SECRET", v)
+			if _, err := New(); err != nil {
+				t.Fatalf("New with %s secret: %v", name, err)
+			}
+		})
+	}
+}
+
+func mustPKCS8(t *testing.T) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
 
 // startFakeIMAPListener is injected by fakeimap_test.go.
 var startFakeIMAP func(t *testing.T) (addr string, cleanup func())
@@ -117,7 +242,7 @@ func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestDiscoveryEndpoint(t *testing.T) {
-	h := New()
+	h := newTestHandler(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -140,7 +265,7 @@ func TestDiscoveryEndpoint(t *testing.T) {
 }
 
 func TestMissingCredentialReturns401WithChallenge(t *testing.T) {
-	h := New()
+	h := newTestHandler(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -168,7 +293,7 @@ func TestMissingCredentialReturns401WithChallenge(t *testing.T) {
 }
 
 func TestInvalidBearerTokenReturns401(t *testing.T) {
-	h := New()
+	h := newTestHandler(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -192,7 +317,7 @@ func TestInvalidBearerTokenReturns401(t *testing.T) {
 }
 
 func TestUnknownPathIs404(t *testing.T) {
-	h := New()
+	h := newTestHandler(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/gmail.com?username=user")
@@ -214,7 +339,7 @@ func TestMCPSessionOverHTTP(t *testing.T) {
 	_, port := splitAddr(addr)
 
 	// Stateless: everything via the OAuth bearer token, no server-side config.
-	h := New()
+	h := newTestHandler(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -304,7 +429,7 @@ func TestWrongPasswordInTokenFailsAtIMAP(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	h := New()
+	h := newTestHandler(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -366,7 +491,7 @@ func TestConsentVerificationE2E(t *testing.T) {
 	defer cleanup()
 	_, port := splitAddr(addr)
 
-	h := New()
+	h := newTestHandler(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -431,7 +556,7 @@ func TestConsentVerificationE2E(t *testing.T) {
 }
 
 func TestProtectedResourceMetadata(t *testing.T) {
-	h := New()
+	h := newTestHandler(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -466,7 +591,7 @@ func TestOAuthFlow(t *testing.T) {
 	oauthserver.VerifyAccount = func(acc *config.Account) error { return nil }
 	t.Cleanup(func() { oauthserver.VerifyAccount = oldVerify })
 
-	h := New()
+	h := newTestHandler(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 

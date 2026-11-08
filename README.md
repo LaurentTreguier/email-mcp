@@ -7,7 +7,7 @@ POST https://mcp.example.org/mcp
 Authorization: ****** <access token>
 ```
 
-Current release: **v0.3.0** (see [CHANGELOG.md](CHANGELOG.md)).
+Current release: **v0.4.0** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Usage
 
@@ -65,7 +65,21 @@ Server-level settings are deployment knobs only:
 |---|---|
 | `-addr` / `EMAIL_MCP_ADDR` | listen address (default `:8080`) |
 | `EMAIL_MCP_BASE_URL` | public base URL used as the OAuth issuer (default: derived per request from scheme+host) |
-| `EMAIL_MCP_TOKEN_SECRET` | 32-byte secret (base64 or raw) encrypting the account claim inside OAuth access tokens; random per start if unset (tokens don't survive restarts) |
+| `EMAIL_MCP_SIGNING_KEY` | **Required.** RSA private key (PKCS#8 or PKCS#1) that signs access tokens — as PEM text, or base64-encoded PEM (handy since env vars don't carry PEM's newlines) |
+| `EMAIL_MCP_SIGNING_KEY_FILE` | **Required if `EMAIL_MCP_SIGNING_KEY` is unset.** Path to the PEM key file (takes precedence; meant for mounted secrets, e.g. `-v key.pem:/key.pem:ro -e EMAIL_MCP_SIGNING_KEY_FILE=/key.pem`) |
+| `EMAIL_MCP_TOKEN_SECRET` | **Required.** 32-byte secret encrypting the account claim inside OAuth access tokens — a plain 32-char random string is used raw; otherwise the value is base64-decoded (e.g. `openssl rand -base64 32`) |
+
+### Restarts and redeployments
+
+`EMAIL_MCP_SIGNING_KEY`/`_FILE` and `EMAIL_MCP_TOKEN_SECRET` are **required**:
+the server refuses to start without them. With them set, the signing key
+(`kid` in JWKS) and the token-encryption secret are stable, so **access tokens
+issued before a restart keep working after it** — redeployments no longer
+invalidate existing MCP connections. Client registrations, authorization codes
+and refresh tokens remain in-memory by design: after a restart an OAuth
+client simply re-registers (`POST /oauth/register`) and redoes consent to get
+a fresh token; long-lived bearer tokens already in client configs are
+unaffected.
 
 ### OAuth endpoints
 
@@ -81,13 +95,21 @@ go build -o email-mcp ./cmd/email-mcp
 # https://mcp.example.org  ->  http://127.0.0.1:8080
 ```
 
-Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`); `EMAIL_MCP_BASE_URL` and `EMAIL_MCP_TOKEN_SECRET` for the OAuth issuer and token encryption.
+Flags/env: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`); `EMAIL_MCP_BASE_URL` for the OAuth issuer; `EMAIL_MCP_SIGNING_KEY` (or `EMAIL_MCP_SIGNING_KEY_FILE`) and `EMAIL_MCP_TOKEN_SECRET` are **required** — the server exits at startup without them.
 
 ### Docker
 
 ```sh
 docker build -t email-mcp .
-docker run -p 8080:8080 email-mcp
+# generate a stable signing key once, and a 32-byte token secret:
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out signing-key.pem
+openssl rand -base64 32 > token-secret.txt
+docker run -p 8080:8080 \
+  -e EMAIL_MCP_BASE_URL=https://mcp.example.org \
+  -e EMAIL_MCP_SIGNING_KEY_FILE=/run/secrets/signing-key.pem \
+  -e EMAIL_MCP_TOKEN_SECRET="$(cat token-secret.txt)" \
+  -v "$PWD/signing-key.pem:/run/secrets/signing-key.pem:ro" \
+  email-mcp
 # stateless: POST https://mcp.example.org/mcp with Authorization: ****** <OAuth access token>
 # (put a TLS-terminating reverse proxy in front for HTTPS)
 ```
@@ -128,6 +150,6 @@ go test ./...   # unit tests against in-memory fake IMAP/SMTP servers + end-to-e
 ## Security notes
 
 - Authentication is OAuth 2.0 only: credentials are captured once at consent time and carried encrypted inside the access token; the server keeps no account state and never logs them, and they never appear in URLs.
-- OAuth access tokens are RS256 JWTs whose account claim is AES-256-GCM encrypted with `EMAIL_MCP_TOKEN_SECRET`; refresh tokens are random and rotated on use.
+- OAuth access tokens are RS256 JWTs signed with the configured `EMAIL_MCP_SIGNING_KEY`/`_FILE` key and carrying an account claim AES-256-GCM encrypted with `EMAIL_MCP_TOKEN_SECRET` — both required at startup so tokens survive restarts; refresh tokens are random, in-memory, and rotated on use (re-register after a restart).
 - TLS by default; the `imap_insecure` / `smtp_insecure` / `*_skip_verify` consent-form options are explicit opt-ins for local testing.
 - Destructive tools are annotated (`delete_messages` has `destructiveHint`); keep a human in the loop in your client.

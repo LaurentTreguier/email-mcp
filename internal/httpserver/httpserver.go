@@ -14,6 +14,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -38,15 +39,24 @@ const MCPEndpoint = "/mcp"
 // no account state is kept between requests. The root path serves a discovery
 // document (JSON, or a short HTML how-to for browsers), and the OAuth
 // authorization-server endpoints are served under /oauth and /.well-known.
-func New() http.Handler {
+//
+// It fails when the runtime configuration needed for restart-stable tokens is
+// missing (EMAIL_MCP_SIGNING_KEY or EMAIL_MCP_SIGNING_KEY_FILE, and
+// EMAIL_MCP_TOKEN_SECRET): without them every restart would invalidate all
+// issued access tokens.
+func New() (http.Handler, error) {
 	return NewWithOAuth(nil)
 }
 
-// NewWithOAuth is like New but also serves the built-in OAuth 2.0
-// authorization server when oauthOpts is non-nil. When nil, an authorization
-// server is created lazily from EMAIL_MCP_BASE_URL (or per-request host) with
-// a generated token secret.
-func NewWithOAuth(oauthOpts *oauthserver.Options) http.Handler {
+// NewWithOAuth is like New but takes explicit OAuth options. When nil, the
+// options are built from the environment: EMAIL_MCP_BASE_URL (issuer, else
+// derived per request), EMAIL_MCP_SIGNING_KEY / EMAIL_MCP_SIGNING_KEY_FILE
+// (RSA private key, required — the inline variant takes PEM text or
+// base64-encoded PEM since PEM's newlines are awkward in env vars; the file
+// variant takes precedence and is meant for mounted secrets), and
+// EMAIL_MCP_TOKEN_SECRET (required 32-byte secret: a plain 32-char random
+// string is used raw; otherwise the value is base64-decoded).
+func NewWithOAuth(oauthOpts *oauthserver.Options) (http.Handler, error) {
 	// The built-in OAuth authorization server. BaseURL may be empty: the
 	// issuer is then derived per request from scheme+host.
 	var oauthSrv *oauthserver.Server
@@ -55,11 +65,34 @@ func NewWithOAuth(oauthOpts *oauthserver.Options) http.Handler {
 		if v := os.Getenv("EMAIL_MCP_BASE_URL"); v != "" {
 			oauthOpts.BaseURL = strings.TrimRight(v, "/")
 		}
+		// Signing key: PEM inline (optionally base64-encoded), or read from
+		// a file (mounted secret).
+		if v := os.Getenv("EMAIL_MCP_SIGNING_KEY"); v != "" {
+			pemBytes := []byte(v)
+			if !bytes.Contains(pemBytes, []byte("-----BEGIN")) {
+				// No PEM header: assume base64-encoded PEM (env vars don't
+				// carry newlines well).
+				if dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(v)); err == nil {
+					pemBytes = dec
+				}
+			}
+			oauthOpts.SigningKeyPEM = pemBytes
+		}
+		if v := os.Getenv("EMAIL_MCP_SIGNING_KEY_FILE"); v != "" {
+			pemBytes, err := os.ReadFile(v)
+			if err != nil {
+				return nil, fmt.Errorf("read EMAIL_MCP_SIGNING_KEY_FILE: %w", err)
+			}
+			oauthOpts.SigningKeyPEM = pemBytes
+		}
 		if v := os.Getenv("EMAIL_MCP_TOKEN_SECRET"); v != "" {
-			secret, err := base64.StdEncoding.DecodeString(v)
-			if err != nil || len(secret) != 32 {
-				// fall back to raw bytes if not base64
-				secret = []byte(v)
+			// A plain random string is used raw; only fall back to base64
+			// when the raw value is not exactly 32 bytes.
+			secret := []byte(v)
+			if len(secret) != 32 {
+				if dec, err := base64.StdEncoding.DecodeString(v); err == nil {
+					secret = dec
+				}
 			}
 			if len(secret) > 32 {
 				secret = secret[:32]
@@ -76,8 +109,9 @@ func NewWithOAuth(oauthOpts *oauthserver.Options) http.Handler {
 	oauthSrv, err = oauthserver.New(oauthOpts)
 	if err != nil {
 		// OAuth is the only auth path: without the authorization server no
-		// /mcp request can be authenticated.
-		slog.Warn("oauth authorization server disabled; /mcp will reject all requests", "err", err)
+		// /mcp request can be authenticated. Fail fast at startup instead of
+		// serving a server whose tokens die on the next restart.
+		return nil, fmt.Errorf("oauth authorization server: %w", err)
 	}
 
 	// wrapped serves POST /mcp: it builds the account once per request from
@@ -131,14 +165,10 @@ func NewWithOAuth(oauthOpts *oauthserver.Options) http.Handler {
 			wrapped.ServeHTTP(w, r)
 		default:
 			// OAuth authorization-server endpoints.
-			if oauthSrv != nil {
-				oauthSrv.Handler().ServeHTTP(w, r)
-				return
-			}
-			http.NotFound(w, r)
+			oauthSrv.Handler().ServeHTTP(w, r)
 		}
 	})
-	return root
+	return root, nil
 }
 
 // scheme reports the scheme clients use to reach this server.

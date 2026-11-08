@@ -45,8 +45,12 @@ This matches MCP clients with named connections (Mistral Vibe, VS Code
   short HTML how-to page explaining the OAuth flow.
 - Env/flags: `-addr` / `EMAIL_MCP_ADDR` (default `:8080`),
   `EMAIL_MCP_BASE_URL` (OAuth issuer; default derived per request),
+  `EMAIL_MCP_SIGNING_KEY` / `EMAIL_MCP_SIGNING_KEY_FILE` (RSA private key
+  signing access tokens — PEM text or base64-of-PEM inline, file variant takes
+  precedence; **required**),
   `EMAIL_MCP_TOKEN_SECRET` (32-byte secret encrypting the account claim in
-  OAuth tokens; random per start if unset).
+  OAuth tokens — raw 32-char string or base64; **required**). The server fails
+  to start without them so issued tokens survive restarts.
 
 ## Layout
 
@@ -124,7 +128,9 @@ go run ./cmd/email-mcp -addr :8080   # local run; try GET / with Accept: text/ht
   `oauthserver.VerifyAccessToken`. The only MCP endpoint is `POST /mcp`.
 - **Secrets**: never in URLs, logs, or cache keys. Credentials are captured
   only on the OAuth consent form and travel solely inside the encrypted claim
-  of the access token (AES-256-GCM with `EMAIL_MCP_TOKEN_SECRET`).
+  of the access token (AES-256-GCM with `EMAIL_MCP_TOKEN_SECRET`; tokens are
+  RS256-signed with the required `EMAIL_MCP_SIGNING_KEY`/`_FILE` key, which
+  is what makes tokens survive restarts).
   `*_insecure`/`*_skip_verify` consent-form options are explicit opt-ins for
   local testing only (carry `//nolint:gosec` with a reason).
 - Error paths: auth failures on `/mcp` must surface as HTTP 401 with a

@@ -3,7 +3,10 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
-## Unreleased
+## v0.4.3
+
+Patch release (hotfix): the consent form's "local testing only" fields are
+hidden again in production.
 
 ### Fixed
 

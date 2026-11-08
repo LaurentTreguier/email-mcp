@@ -3,6 +3,14 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
+## v0.4.2
+
+Patch release (hotfix): fix consent-time IMAP validation on IMAP4rev1-only
+servers — the `STATUS` command no longer requests `DELETED`/`SIZE` unless the
+server advertises `IMAP4rev2`/`QUOTA`/`STATUS=SIZE`, with a one-shot fallback
+to the base IMAP4rev1 items, so servers like Dovecot without QUOTA (which
+answer `BAD Invalid status item DELETED`) can be connected again.
+
 ## v0.4.1
 
 Patch release: fix the CI docker smoke test, which mounted the generated

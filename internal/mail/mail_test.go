@@ -498,6 +498,59 @@ func TestVerifyIMAPBadPassword(t *testing.T) {
 	}
 }
 
+// strictRev1Session mimics an IMAP4rev1-only server (e.g. Dovecot without
+// the QUOTA capability) that rejects the whole STATUS command with BAD when
+// a non-rev1 status item (DELETED, SIZE) is requested.
+type strictRev1Session struct{ *fakeSession }
+
+func (s *strictRev1Session) Status(mailbox string, options *imap.StatusOptions) (*imap.StatusData, error) {
+	if options.NumDeleted || options.Size {
+		return nil, &imap.Error{
+			Type: imap.StatusResponseTypeBad,
+			Text: "Invalid status item DELETED",
+		}
+	}
+	return s.fakeSession.Status(mailbox, options)
+}
+
+// startStrictRev1IMAP starts an in-memory IMAP4rev1 server that rejects
+// DELETED/SIZE status items, like the user's server does.
+func startStrictRev1IMAP(t *testing.T, b *fakeBackend) string {
+	t.Helper()
+	srv := imapserver.New(&imapserver.Options{
+		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return &strictRev1Session{&fakeSession{b: b, t: t}}, &imapserver.GreetingData{}, nil
+		},
+		Caps:         imap.CapSet{imap.CapIMAP4rev1: {}},
+		InsecureAuth: true,
+		Logger:       testLogger{t},
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close(); ln.Close() })
+	return ln.Addr().String()
+}
+
+func TestVerifyIMAPStrictRev1Server(t *testing.T) {
+	b := newFakeBackend()
+	b.addMessage("INBOX", sampleMessage)
+	addr := startStrictRev1IMAP(t, b)
+	s := testSession(t, addr)
+	if err := s.VerifyIMAP(); err != nil {
+		t.Fatalf("VerifyIMAP against strict IMAP4rev1 server: %v", err)
+	}
+	st, err := s.MailboxStatus("INBOX")
+	if err != nil {
+		t.Fatalf("MailboxStatus against strict IMAP4rev1 server: %v", err)
+	}
+	if st.NumMessages == nil || *st.NumMessages != 1 {
+		t.Fatalf("unexpected status data: %+v", st)
+	}
+}
+
 func TestListAndStatus(t *testing.T) {
 	b := newFakeBackend()
 	b.addMessage("INBOX", sampleMessage)

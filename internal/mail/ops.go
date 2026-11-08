@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -44,6 +45,33 @@ func (s *Session) VerifyIMAP() error {
 		return fmt.Errorf("STATUS INBOX: %w", err)
 	}
 	return nil
+}
+
+// statusOptions builds the STATUS item list for a client. DELETED requires
+// IMAP4rev2 or QUOTA and SIZE requires IMAP4rev2 or STATUS=SIZE, so they are
+// only requested when the server advertises the capability; many IMAP4rev1
+// servers (e.g. Dovecot without QUOTA) reject the whole STATUS command with
+// BAD "Invalid status item" otherwise.
+func statusOptions(c *imapclient.Client) *imap.StatusOptions {
+	opts := &imap.StatusOptions{
+		NumMessages: true, NumUnseen: true,
+		UIDNext: true, UIDValidity: true,
+	}
+	caps := c.Caps()
+	if caps.Has(imap.CapIMAP4rev2) || caps.Has(imap.CapQuota) {
+		opts.NumDeleted = true
+	}
+	if caps.Has(imap.CapIMAP4rev2) || caps.Has(imap.CapStatusSize) {
+		opts.Size = true
+	}
+	return opts
+}
+
+// isBadStatus reports whether err is a BAD status response to a STATUS
+// command, i.e. the server rejected one of the requested status items.
+func isBadStatus(err error) bool {
+	var imapErr *imap.Error
+	return errors.As(err, &imapErr) && imapErr.Type == imap.StatusResponseTypeBad
 }
 
 // Address is a simplified mail address.
@@ -374,13 +402,19 @@ func (s *Session) Unsubscribe(name string) error {
 
 // MailboxStatus returns STATUS data for a mailbox without selecting it.
 func (s *Session) MailboxStatus(mailbox string) (*MailboxStatus, error) {
-	opts := &imap.StatusOptions{
-		NumMessages: true, NumUnseen: true, NumDeleted: true,
-		UIDNext: true, UIDValidity: true, Size: true,
-	}
 	var st *MailboxStatus
 	err := s.withClient(func(c *imapclient.Client) error {
+		opts := statusOptions(c)
 		data, err := c.Status(mailbox, opts).Wait()
+		if err != nil && isBadStatus(err) {
+			// The server rejected an optional status item it does not
+			// advertise: retry once with the base IMAP4rev1 items only.
+			base := &imap.StatusOptions{
+				NumMessages: true, NumUnseen: true,
+				UIDNext: true, UIDValidity: true,
+			}
+			data, err = c.Status(mailbox, base).Wait()
+		}
 		if err != nil {
 			return err
 		}

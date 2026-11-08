@@ -188,4 +188,31 @@ func TestSendViaFakeSMTP(t *testing.T) {
 	}
 }
 
+func TestVerifySMTP(t *testing.T) {
+	_, smtpAddr := startFakeSMTP(t)
+	acc := &config.Account{
+		Email:    "user@example.com",
+		Username: "user@example.com",
+		Password: "secret",
+		SMTP:     config.SMTPConfig{Host: hostOf(smtpAddr), Port: portOf(smtpAddr), Insecure: true},
+	}
+	s := NewSession(acc)
+	if err := s.VerifySMTP(); err != nil {
+		t.Fatalf("VerifySMTP: %v", err)
+	}
+}
+
+func TestVerifySMTPUnreachable(t *testing.T) {
+	acc := &config.Account{
+		Email:    "user@example.com",
+		Username: "user@example.com",
+		Password: "secret",
+		SMTP:     config.SMTPConfig{Host: "127.0.0.1", Port: 1, Insecure: true},
+	}
+	s := NewSession(acc)
+	if err := s.VerifySMTP(); err == nil {
+		t.Fatal("expected error for unreachable SMTP server")
+	}
+}
+
 var _ = io.EOF

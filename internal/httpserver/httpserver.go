@@ -173,26 +173,8 @@ func buildAccount(h http.Header, oauthSrv *oauthserver.Server) (*config.Account,
 	}
 
 	// Auto-discover any missing server settings via DNS for the address domain.
-	if acc.IMAP.Host == "" || acc.SMTP.Host == "" {
-		domain := acc.Domain()
-		discovered, derr := discovery.Discover(domain)
-		if derr != nil {
-			return nil, fmt.Errorf("auto-discovery for %s failed: %w (set imap_host/smtp_host in the consent form)", domain, derr)
-		}
-		if acc.IMAP.Host == "" {
-			mode := "tls"
-			if !discovered.IMAPTLS {
-				mode = "starttls"
-			}
-			acc.SetIMAP(discovered.IMAPHost, discovered.IMAPPort, mode)
-		}
-		if acc.SMTP.Host == "" {
-			mode := "tls"
-			if !discovered.SMTPTLS {
-				mode = "starttls"
-			}
-			acc.SetSMTP(discovered.SMTPHost, discovered.SMTPPort, mode)
-		}
+	if err := discovery.FillDefaults(acc); err != nil {
+		return nil, err
 	}
 	return acc, nil
 }

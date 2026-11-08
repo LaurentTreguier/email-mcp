@@ -14,6 +14,9 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"email-mcp/internal/config"
+	"email-mcp/internal/oauthserver"
 )
 
 // startFakeIMAPListener is injected by fakeimap_test.go.
@@ -24,6 +27,9 @@ var startFakeIMAP func(t *testing.T) (addr string, cleanup func())
 // token usable as "Authorization: ****** <token>" against srv/mcp.
 func oauthToken(t *testing.T, srv *httptest.Server, extraForm url.Values) string {
 	t.Helper()
+	oldVerify := oauthserver.VerifyAccount
+	oauthserver.VerifyAccount = func(acc *config.Account) error { return nil }
+	t.Cleanup(func() { oauthserver.VerifyAccount = oldVerify })
 
 	// Dynamic client registration (RFC 7591).
 	regBody := strings.NewReader(`{"redirect_uris":["http://localhost:9999/callback"],"client_name":"test"}`)
@@ -348,6 +354,82 @@ func TestWrongPasswordInTokenFailsAtIMAP(t *testing.T) {
 	}
 }
 
+// TestConsentVerificationE2E runs the real consent POST against the fake
+// IMAP/SMTP endpoints: with a wrong password the consent must fail with a
+// 400 + error banner (no code issued); with correct credentials it must
+// succeed (303 + code).
+func TestConsentVerificationE2E(t *testing.T) {
+	if startFakeIMAP == nil {
+		t.Skip("no fake IMAP server wired")
+	}
+	addr, cleanup := startFakeIMAP(t)
+	defer cleanup()
+	_, port := splitAddr(addr)
+
+	h := New()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	noRedir := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	doConsent := func(password string) (int, string, string) {
+		// register
+		regBody := strings.NewReader(`{"redirect_uris":["http://localhost:9999/callback"]}`)
+		req, _ := http.NewRequest("POST", srv.URL+"/oauth/register", regBody)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reg struct {
+			ClientID string `json:"client_id"`
+		}
+		json.NewDecoder(resp.Body).Decode(&reg) //nolint:errcheck
+		resp.Body.Close()
+		form := url.Values{
+			"client_id":             {reg.ClientID},
+			"redirect_uri":          {"http://localhost:9999/callback"},
+			"code_challenge":        {"challenge"},
+			"code_challenge_method": {"S256"},
+			"email":                 {"user@example.com"},
+			"password":              {password},
+			"imap_host":             {"127.0.0.1"},
+			"imap_port":             {fmt.Sprint(port)},
+			"imap_insecure":         {"1"},
+			"smtp_host":             {"127.0.0.1"},
+			"smtp_port":             {"25"},
+			"smtp_insecure":         {"1"},
+		}
+		resp, err = noRedir.PostForm(srv.URL+"/oauth/authorize", form)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get("Location"), string(body)
+	}
+
+	// Wrong password: the fake IMAP rejects the login → 400 + banner.
+	code, loc, body := doConsent("wrong-password")
+	if code != http.StatusBadRequest || loc != "" {
+		t.Fatalf("wrong password: expected 400 without redirect, got %d loc=%q", code, loc)
+	}
+	if !strings.Contains(body, "Setup check failed") || !strings.Contains(strings.ToLower(body), "imap") {
+		t.Fatalf("expected IMAP error banner, got: %s", body)
+	}
+
+	// Correct password but no SMTP listener on 127.0.0.1:25: consent must
+	// fail with an SMTP error banner (proves the SMTP leg is checked too).
+	code2, loc2, body2 := doConsent("secret")
+	if code2 != http.StatusBadRequest || loc2 != "" {
+		t.Fatalf("expected 400 without redirect (SMTP unreachable), got %d loc=%q", code2, loc2)
+	}
+	if !strings.Contains(body2, "Setup check failed") || !strings.Contains(strings.ToLower(body2), "smtp") {
+		t.Fatalf("expected SMTP error banner, got: %s", body2)
+	}
+}
+
 func TestProtectedResourceMetadata(t *testing.T) {
 	h := New()
 	srv := httptest.NewServer(h)
@@ -377,6 +459,12 @@ func TestOAuthFlow(t *testing.T) {
 	addr, cleanup := startFakeIMAP(t)
 	defer cleanup()
 	_, port := splitAddr(addr)
+
+	// Consent-time verification is stubbed here; it is exercised for real
+	// in TestConsentVerificationE2E and the oauthserver package tests.
+	oldVerify := oauthserver.VerifyAccount
+	oauthserver.VerifyAccount = func(acc *config.Account) error { return nil }
+	t.Cleanup(func() { oauthserver.VerifyAccount = oldVerify })
 
 	h := New()
 	srv := httptest.NewServer(h)

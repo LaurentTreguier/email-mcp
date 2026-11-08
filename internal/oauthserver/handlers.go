@@ -2,6 +2,7 @@ package oauthserver
 
 import (
 	"crypto/sha256"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,9 @@ import (
 
 	"email-mcp/internal/config"
 )
+
+//go:embed templates/consent.html
+var templatesFS embed.FS
 
 // Handler returns the http.Handler serving all OAuth endpoints of the
 // authorization server.
@@ -147,61 +151,9 @@ type authorizeQuery struct {
 	CodeChallengeMethod string
 }
 
-var consentPage = template.Must(template.New("consent").Parse(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>email-mcp — authorize mail access</title></head>
-<body>
-<h1>Authorize email-mcp to access your mail account</h1>
-<p>Client <code>{{.ClientID}}</code> requests access (scope: {{.Scope}}).
-Enter the mail account to grant:</p>
-<form method="post" action="` + AuthorizePath + `">
-<input type="hidden" name="client_id" value="{{.ClientID}}">
-<input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
-<input type="hidden" name="state" value="{{.State}}">
-<input type="hidden" name="scope" value="{{.Scope}}">
-<input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
-<input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
-<fieldset>
-<legend>Account</legend>
-<p><label>email (required): <input type="text" name="email" placeholder="user@gmail.com" required></label></p>
-<p><label>password / app password (required): <input type="password" name="password" required></label></p>
-<p><label>username (login override, default: the email): <input type="text" name="username"></label></p>
-<p><label>display_name: <input type="text" name="display_name"></label></p>
-<p><label>auth_mechanism:
-<select name="auth_mechanism">
-<option value="">plain (default)</option>
-<option value="login">login</option>
-<option value="xoauth2">xoauth2</option>
-</select></label></p>
-</fieldset>
-<fieldset>
-<legend>IMAP (leave empty for DNS auto-discovery)</legend>
-<p><label>imap_host: <input type="text" name="imap_host" placeholder="imap.example.org"></label>
-<label>imap_port: <input type="text" name="imap_port" size="6" placeholder="993"></label></p>
-<p><label><input type="checkbox" name="imap_tls" value="1"> imap_tls</label>
-<label><input type="checkbox" name="imap_starttls" value="1"> imap_starttls</label>
-<label><input type="checkbox" name="imap_insecure" value="1"> imap_insecure (local testing only)</label>
-<label><input type="checkbox" name="imap_skip_verify" value="1"> imap_skip_verify (local testing only)</label></p>
-</fieldset>
-<fieldset>
-<legend>SMTP (leave empty for DNS auto-discovery)</legend>
-<p><label>smtp_host: <input type="text" name="smtp_host" placeholder="smtp.example.org"></label>
-<label>smtp_port: <input type="text" name="smtp_port" size="6" placeholder="465"></label></p>
-<p><label><input type="checkbox" name="smtp_tls" value="1"> smtp_tls</label>
-<label><input type="checkbox" name="smtp_starttls" value="1"> smtp_starttls</label>
-<label><input type="checkbox" name="smtp_insecure" value="1"> smtp_insecure (local testing only)</label>
-<label><input type="checkbox" name="smtp_skip_verify" value="1"> smtp_skip_verify (local testing only)</label></p>
-</fieldset>
-<fieldset>
-<legend>Folders</legend>
-<p><label>sent_mailbox: <input type="text" name="sent_mailbox" placeholder="Sent"></label>
-<label>drafts_mailbox: <input type="text" name="drafts_mailbox" placeholder="Drafts"></label></p>
-</fieldset>
-<p><button type="submit">Authorize</button></p>
-</form>
-</body>
-</html>
-`))
+// consentPage is the OAuth consent form served at GET /oauth/authorize,
+// loaded from templates/consent.html (baked into the binary via embed).
+var consentPage = template.Must(template.ParseFS(templatesFS, "templates/consent.html"))
 
 func parseAuthorizeQuery(r *http.Request) (authorizeQuery, error) {
 	q := r.URL.Query()
@@ -246,7 +198,29 @@ func (s *Server) serveAuthorizeForm(w http.ResponseWriter, r *http.Request) {
 		aq.Scope = "email"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	consentPage.Execute(w, aq) //nolint:errcheck
+	consentPage.Execute(w, consentData(aq, "", nil)) //nolint:errcheck
+}
+
+// consentTemplateData is the consent page's template data: the OAuth query
+// fields plus an optional error and the submitted form values (used to
+// re-fill the form after a failed verification).
+type consentTemplateData struct {
+	authorizeQuery
+	Action string
+	Error  string
+	Values url.Values
+}
+
+func consentData(aq authorizeQuery, errStr string, values url.Values) consentTemplateData {
+	return consentTemplateData{authorizeQuery: aq, Action: AuthorizePath, Error: errStr, Values: values}
+}
+
+// consentFormValues re-renders the consent form pre-filled with the
+// submitted account fields (password never re-rendered) plus an error.
+func renderConsentWithError(w http.ResponseWriter, r *http.Request, aq authorizeQuery, verr error) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = consentPage.Execute(w, consentData(aq, verr.Error(), r.PostForm)) //nolint:errcheck
 }
 
 // accountFromForm builds an account from the consent form fields.
@@ -296,6 +270,14 @@ func (s *Server) serveAuthorizeConsent(w http.ResponseWriter, r *http.Request) {
 	acc, err := accountFromForm(r)
 	if err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	// Validate the account now, with read-only checks (DNS auto-discovery +
+	// IMAP login/LIST/STATUS + SMTP EHLO/AUTH/NOOP), so a wrong password or
+	// bad server fails here with a clear message instead of surfacing as a
+	// 401 when the client first calls /mcp.
+	if err := VerifyAccount(acc); err != nil {
+		renderConsentWithError(w, r, aq, err)
 		return
 	}
 	code := randomToken(24)

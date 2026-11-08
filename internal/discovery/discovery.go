@@ -72,6 +72,44 @@ func Discover(domain string) (*ServerSettings, error) {
 	return s, nil
 }
 
+// Account is the subset of config.Account needed to fill in discovered
+// server settings. Shared by the OAuth consent flow and the /mcp request
+// path so both resolve servers identically.
+type Account interface {
+	Domain() string
+	IMAPHost() string
+	SMTPHost() string
+	SetIMAP(host string, port int, tlsMode string)
+	SetSMTP(host string, port int, tlsMode string)
+}
+
+// FillDefaults auto-discovers any missing IMAP/SMTP settings of acc from its
+// email domain and applies them in place.
+func FillDefaults(acc Account) error {
+	if acc.IMAPHost() != "" && acc.SMTPHost() != "" {
+		return nil
+	}
+	discovered, err := Discover(acc.Domain())
+	if err != nil {
+		return fmt.Errorf("auto-discovery for %s failed: %w (set imap_host/smtp_host explicitly)", acc.Domain(), err)
+	}
+	if acc.IMAPHost() == "" {
+		mode := "tls"
+		if !discovered.IMAPTLS {
+			mode = "starttls"
+		}
+		acc.SetIMAP(discovered.IMAPHost, discovered.IMAPPort, mode)
+	}
+	if acc.SMTPHost() == "" {
+		mode := "tls"
+		if !discovered.SMTPTLS {
+			mode = "starttls"
+		}
+		acc.SetSMTP(discovered.SMTPHost, discovered.SMTPPort, mode)
+	}
+	return nil
+}
+
 // Function hooks (overridable in tests).
 var (
 	lookupSRVFunc = func(ctx context.Context, res *net.Resolver, service, domain string) (string, int, bool) {

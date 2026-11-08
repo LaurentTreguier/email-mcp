@@ -171,6 +171,60 @@ func containsStr(l []string, s string) bool {
 // Send submits a raw message via SMTP and, on success, appends it to the Sent mailbox.
 // recipients is the full envelope recipient list (to + cc + bcc).
 // saveToSent controls whether a copy is appended to the Sent mailbox.
+// VerifySMTP checks that the SMTP submission server is reachable and that
+// the credentials are accepted, without sending anything: dial, EHLO,
+// AUTH, NOOP, QUIT. Used to validate an account at setup time.
+func (s *Session) VerifySMTP() error {
+	acc := s.acc
+	addr := net.JoinHostPort(acc.SMTP.Host, strconv.Itoa(acc.SMTP.Port))
+	tlsCfg := &tls.Config{ServerName: acc.SMTP.Host, InsecureSkipVerify: acc.SMTP.InsecureSkipVerify} //nolint:gosec // opt-in for testing
+
+	var c *smtp.Client
+	var err error
+	switch {
+	case acc.SMTP.TLS:
+		c, err = smtp.DialTLS(addr, tlsCfg)
+	case acc.SMTP.Insecure:
+		c, err = smtp.Dial(addr)
+	default:
+		c, err = smtp.DialStartTLS(addr, tlsCfg)
+	}
+	if err != nil {
+		return fmt.Errorf("dialing SMTP %s: %w", addr, err)
+	}
+	defer c.Close()
+
+	if err := c.Hello("localhost"); err != nil {
+		return fmt.Errorf("SMTP EHLO: %w", err)
+	}
+	switch acc.AuthMechanism {
+	case "", "plain":
+		if ok, _ := c.Extension("AUTH"); ok {
+			if err := c.Auth(sasl.NewPlainClient("", acc.Username, acc.Password)); err != nil {
+				return fmt.Errorf("SMTP AUTH PLAIN: %w", err)
+			}
+		}
+	case "login":
+		if err := c.Auth(sasl.NewLoginClient(acc.Username, acc.Password)); err != nil {
+			return fmt.Errorf("SMTP AUTH LOGIN: %w", err)
+		}
+	case "xoauth2":
+		if err := c.Auth(sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{
+			Username: acc.Username,
+			Token:    acc.Password,
+		})); err != nil {
+			return fmt.Errorf("SMTP AUTH XOAUTH2: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported auth_mechanism %q", acc.AuthMechanism)
+	}
+	if err := c.Noop(); err != nil {
+		return fmt.Errorf("SMTP NOOP: %w", err)
+	}
+	_ = c.Quit()
+	return nil
+}
+
 func (s *Session) Send(raw []byte, from string, recipients []string, saveToSent bool) error {
 	acc := s.acc
 	addr := net.JoinHostPort(acc.SMTP.Host, strconv.Itoa(acc.SMTP.Port))

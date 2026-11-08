@@ -3,7 +3,10 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
-## Unreleased
+## v0.3.0
+
+Minor release: consent-time account validation plus a cleaner internal
+structure for the HTML pages.
 
 ### Added
 
@@ -17,6 +20,14 @@ semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
   (password never re-rendered), so a wrong password or bad server is
   reported immediately instead of surfacing as a 401 on the first
   `POST /mcp`.
+
+### Changed
+
+- **HTML pages are now separate template files**: the browser how-to page
+  (`GET /`) and the OAuth consent form (`GET /oauth/authorize`) moved from
+  raw string literals in Go into `internal/httpserver/templates/howto.html`
+  and `internal/oauthserver/templates/consent.html`, loaded via `go:embed`
+  + `template.ParseFS` and baked into the binary. No behavior change.
 
 ## v0.2.1
 

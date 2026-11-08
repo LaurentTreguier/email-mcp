@@ -14,6 +14,23 @@ semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
   over plain HTTP (development); over TLS (production) they are omitted.
   The submitted form values are still honored if POSTed directly.
 
+## Unreleased
+
+### Changed
+
+- **Restart-stable OAuth configuration (breaking)**: the RS256 signing key
+  is no longer generated per start. `EMAIL_MCP_SIGNING_KEY` (PEM text, or
+  base64-encoded PEM) or `EMAIL_MCP_SIGNING_KEY_FILE` (path to a PEM file,
+  takes precedence — use it with mounted secrets) is now **required**, and
+  `EMAIL_MCP_TOKEN_SECRET` is **required** as well (raw 32-char string, or
+  base64); the server refuses to start without them instead of
+  silently issuing tokens that die on the next restart. With both set,
+  access tokens issued before a restart keep verifying after it, so
+  redeployments no longer break existing MCP connections. Client
+  registrations, auth codes, and refresh tokens remain in-memory: after a
+  restart, OAuth clients re-register and redo consent, but existing bearer
+  tokens stay valid.
+
 ## v0.3.0
 
 Minor release: consent-time account validation plus a cleaner internal

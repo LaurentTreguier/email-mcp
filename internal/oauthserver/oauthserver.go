@@ -18,8 +18,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"sync"
@@ -90,9 +92,14 @@ type Options struct {
 	// BaseURL is the public base URL of this server, e.g.
 	// "https://mcp.example.org" (no trailing slash).
 	BaseURL string
-	// TokenSecret is the 32-byte secret used to encrypt the account claim
-	// inside access tokens. If nil, a random one is generated (tokens then
-	// don't survive a restart).
+	// SigningKeyPEM is the PEM-encoded RSA private key (PKCS#8 or PKCS#1)
+	// used to sign access tokens. Required: the key must be stable across
+	// restarts, otherwise all previously issued tokens are rejected
+	// ("unknown kid") after a redeploy.
+	SigningKeyPEM []byte
+	// TokenSecret is the required 32-byte secret used to encrypt the
+	// account claim inside access tokens. It must be stable across
+	// restarts, otherwise all previously issued tokens fail decryption.
 	TokenSecret []byte
 	// TokenTTL is the access-token lifetime (default 24h).
 	TokenTTL time.Duration
@@ -100,26 +107,45 @@ type Options struct {
 	RefreshTTL time.Duration
 }
 
-// New creates the authorization server. The RSA signing key is generated
-// fresh on each start (JWKS rotates with it). BaseURL may be empty: the
-// issuer is then derived per request from the request's scheme+host.
+// ParseSigningKeyPEM decodes a PEM-encoded RSA private key, trying PKCS#8
+// ("PRIVATE KEY") first, then PKCS#1 ("RSA PRIVATE KEY").
+func ParseSigningKeyPEM(pemBytes []byte) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, errors.New("oauthserver: signing key is not PEM-encoded")
+	}
+	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		rsaKey, ok := key.(*rsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("oauthserver: PKCS#8 key is %T, want RSA", key)
+		}
+		return rsaKey, nil
+	}
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("oauthserver: parse signing key (PKCS#8/PKCS#1): %w", err)
+	}
+	return key, nil
+}
+
+// New creates the authorization server. The RSA signing key must come from
+// opts.SigningKeyPEM and the 32-byte token secret from opts.TokenSecret so
+// that issued tokens survive restarts. BaseURL may be empty: the issuer is
+// then derived per request from the request's scheme+host.
 func New(opts *Options) (*Server, error) {
 	if opts == nil {
 		opts = &Options{}
 	}
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if len(opts.SigningKeyPEM) == 0 {
+		return nil, errors.New("oauthserver: SigningKeyPEM is required (set EMAIL_MCP_SIGNING_KEY or EMAIL_MCP_SIGNING_KEY_FILE); tokens would not survive a restart")
+	}
+	key, err := ParseSigningKeyPEM(opts.SigningKeyPEM)
 	if err != nil {
-		return nil, fmt.Errorf("oauthserver: generate RSA key: %w", err)
+		return nil, err
 	}
 	secret := opts.TokenSecret
-	if secret == nil {
-		secret = make([]byte, 32)
-		if _, err := rand.Read(secret); err != nil {
-			return nil, fmt.Errorf("oauthserver: generate token secret: %w", err)
-		}
-	}
 	if len(secret) != 32 {
-		return nil, fmt.Errorf("oauthserver: TokenSecret must be 32 bytes, got %d", len(secret))
+		return nil, fmt.Errorf("oauthserver: TokenSecret must be 32 bytes (set EMAIL_MCP_TOKEN_SECRET), got %d", len(secret))
 	}
 	block, err := aes.NewCipher(secret)
 	if err != nil {

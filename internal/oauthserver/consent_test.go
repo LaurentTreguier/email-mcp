@@ -74,7 +74,7 @@ func TestConsentFormHidesInsecureFieldsOverTLS(t *testing.T) {
 	oldVerify := VerifyAccount
 	VerifyAccount = func(acc *config.Account) error { return nil }
 	t.Cleanup(func() { VerifyAccount = oldVerify })
-	s, err := New(&Options{BaseURL: "https://mcp.example.org"})
+	s, err := New(testOptions(t))
 	if err != nil {
 		t.Fatal(err)
 	}

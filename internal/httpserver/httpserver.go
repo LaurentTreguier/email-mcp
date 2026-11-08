@@ -27,6 +27,7 @@ import (
 
 	"email-mcp/internal/config"
 	"email-mcp/internal/discovery"
+	"email-mcp/internal/httputil"
 	"email-mcp/internal/mcpserver"
 	"email-mcp/internal/oauthserver"
 )
@@ -136,7 +137,7 @@ func NewWithOAuth(oauthOpts *oauthserver.Options) (http.Handler, error) {
 		if r.Method == http.MethodPost {
 			if _, err := buildAccount(r.Header, oauthSrv); err != nil {
 				slog.Warn("mcp auth failed", "path", r.URL.Path, "err", err)
-				w.Header().Set("WWW-Authenticate", `******"email-mcp", resource_metadata="`+scheme(r)+`://`+r.Host+`/.well-known/oauth-protected-resource"`)
+				w.Header().Set("WWW-Authenticate", `******"email-mcp", resource_metadata="`+httputil.Scheme(r)+`://`+r.Host+`/.well-known/oauth-protected-resource"`)
 				http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
 				return
 			}
@@ -149,7 +150,7 @@ func NewWithOAuth(oauthOpts *oauthserver.Options) (http.Handler, error) {
 		// discover how to authenticate to this resource; it points at our own
 		// authorization server.
 		if r.URL.Path == oauthserver.ResourceMetadataPath {
-			base := scheme(r) + "://" + r.Host
+			base := httputil.Scheme(r) + "://" + r.Host
 			resource := base + MCPEndpoint
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"resource":%q,"authorization_servers":[%q],"scopes_supported":["email"],"bearer_methods_supported":["header"],"description":"email-mcp mail resource at %s. Authenticate with an OAuth 2.0 access token issued by the authorization server (metadata at %s)."}`,
@@ -169,17 +170,6 @@ func NewWithOAuth(oauthOpts *oauthserver.Options) (http.Handler, error) {
 		}
 	})
 	return root, nil
-}
-
-// scheme reports the scheme clients use to reach this server.
-func scheme(r *http.Request) string {
-	if r.TLS != nil {
-		return "https"
-	}
-	if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
-		return strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
-	return "http"
 }
 
 // buildAccount builds the account for one request from its OAuth bearer

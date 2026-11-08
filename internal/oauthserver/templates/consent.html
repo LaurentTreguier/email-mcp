@@ -33,8 +33,9 @@ Please correct the fields below and submit again — no authorization was grante
 <label>imap_port: <input type="text" name="imap_port" size="6" placeholder="993"{{with $.Values.Get "imap_port"}} value="{{.}}"{{end}}></label></p>
 <p><label><input type="checkbox" name="imap_tls" value="1"{{if $.Values.Has "imap_tls"}} checked{{end}}> imap_tls</label>
 <label><input type="checkbox" name="imap_starttls" value="1"{{if $.Values.Has "imap_starttls"}} checked{{end}}> imap_starttls</label>
-<label><input type="checkbox" name="imap_insecure" value="1"{{if $.Values.Has "imap_insecure"}} checked{{end}}> imap_insecure (local testing only)</label>
-<label><input type="checkbox" name="imap_skip_verify" value="1"{{if $.Values.Has "imap_skip_verify"}} checked{{end}}> imap_skip_verify (local testing only)</label></p>
+{{if $.Dev}}<label><input type="checkbox" name="imap_insecure" value="1"{{if $.Values.Has "imap_insecure"}} checked{{end}}> imap_insecure (local testing only)</label>
+<label><input type="checkbox" name="imap_skip_verify" value="1"{{if $.Values.Has "imap_skip_verify"}} checked{{end}}> imap_skip_verify (local testing only)</label>
+{{end}}</p>
 </fieldset>
 <fieldset>
 <legend>SMTP (leave empty for DNS auto-discovery)</legend>
@@ -42,8 +43,9 @@ Please correct the fields below and submit again — no authorization was grante
 <label>smtp_port: <input type="text" name="smtp_port" size="6" placeholder="465"{{with $.Values.Get "smtp_port"}} value="{{.}}"{{end}}></label></p>
 <p><label><input type="checkbox" name="smtp_tls" value="1"{{if $.Values.Has "smtp_tls"}} checked{{end}}> smtp_tls</label>
 <label><input type="checkbox" name="smtp_starttls" value="1"{{if $.Values.Has "smtp_starttls"}} checked{{end}}> smtp_starttls</label>
-<label><input type="checkbox" name="smtp_insecure" value="1"{{if $.Values.Has "smtp_insecure"}} checked{{end}}> smtp_insecure (local testing only)</label>
-<label><input type="checkbox" name="smtp_skip_verify" value="1"{{if $.Values.Has "smtp_skip_verify"}} checked{{end}}> smtp_skip_verify (local testing only)</label></p>
+{{if $.Dev}}<label><input type="checkbox" name="smtp_insecure" value="1"{{if $.Values.Has "smtp_insecure"}} checked{{end}}> smtp_insecure (local testing only)</label>
+<label><input type="checkbox" name="smtp_skip_verify" value="1"{{if $.Values.Has "smtp_skip_verify"}} checked{{end}}> smtp_skip_verify (local testing only)</label>
+{{end}}</p>
 </fieldset>
 <fieldset>
 <legend>Folders</legend>

@@ -3,6 +3,17 @@
 All notable changes to email-mcp are documented here. Versions follow
 semantic versioning (git-flow: releases are tagged on `main`, e.g. `v0.1.0`).
 
+## Unreleased
+
+### Changed
+
+- **Consent form hides the "local testing only" fields in production**: the
+  `imap_insecure` / `imap_skip_verify` / `smtp_insecure` /
+  `smtp_skip_verify` checkboxes on the OAuth consent page
+  (`GET /oauth/authorize`) are now only rendered when the request arrives
+  over plain HTTP (development); over TLS (production) they are omitted.
+  The submitted form values are still honored if POSTed directly.
+
 ## v0.3.0
 
 Minor release: consent-time account validation plus a cleaner internal

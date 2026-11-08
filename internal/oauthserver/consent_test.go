@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -49,6 +50,8 @@ func TestConsentFormFields(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	page := string(body)
+	// Plain-HTTP test server = development: the "local testing only"
+	// insecure/skip-verify checkboxes are shown.
 	for _, field := range []string{
 		`name="email"`, `name="password"`, `name="username"`, `name="display_name"`,
 		`name="auth_mechanism"`,
@@ -60,6 +63,68 @@ func TestConsentFormFields(t *testing.T) {
 	} {
 		if !strings.Contains(page, field) {
 			t.Errorf("consent form missing field %s", field)
+		}
+	}
+}
+
+// TestConsentFormHidesInsecureFieldsOverTLS checks that over TLS
+// (production) the consent form does not expose the "local testing only"
+// insecure/skip-verify checkboxes, while the regular fields remain.
+func TestConsentFormHidesInsecureFieldsOverTLS(t *testing.T) {
+	oldVerify := VerifyAccount
+	VerifyAccount = func(acc *config.Account) error { return nil }
+	t.Cleanup(func() { VerifyAccount = oldVerify })
+	s, err := New(&Options{BaseURL: "https://mcp.example.org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewTLSServer(s.Handler())
+	t.Cleanup(srv.Close)
+	client := srv.Client()
+
+	resp, err := client.Post(srv.URL+RegisterPath, "application/json",
+		strings.NewReader(`{"redirect_uris":["http://localhost/cb"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg struct {
+		ClientID string `json:"client_id"`
+	}
+	json.NewDecoder(resp.Body).Decode(&reg) //nolint:errcheck
+	resp.Body.Close()
+
+	verifier := "v"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	q := url.Values{
+		"client_id":             {reg.ClientID},
+		"redirect_uri":          {"http://localhost/cb"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	resp, err = client.Get(srv.URL + AuthorizePath + "?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	page := string(body)
+	for _, field := range []string{
+		`name="imap_insecure"`, `name="imap_skip_verify"`,
+		`name="smtp_insecure"`, `name="smtp_skip_verify"`,
+	} {
+		if strings.Contains(page, field) {
+			t.Errorf("TLS consent form must hide %s (local testing only)", field)
+		}
+	}
+	for _, field := range []string{
+		`name="email"`, `name="password"`,
+		`name="imap_host"`, `name="imap_port"`, `name="imap_tls"`, `name="imap_starttls"`,
+		`name="smtp_host"`, `name="smtp_port"`, `name="smtp_tls"`, `name="smtp_starttls"`,
+		`name="sent_mailbox"`, `name="drafts_mailbox"`,
+	} {
+		if !strings.Contains(page, field) {
+			t.Errorf("TLS consent form missing field %s", field)
 		}
 	}
 }
